@@ -1,0 +1,33 @@
+services:
+  nat-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: labos_nat_server
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./protocols:/app/protocols
+      - ./configs:/app/configs
+      - ./ws_protocol.py:/app/ws_protocol.py:ro
+      - ./logs:/app/logs
+    environment:
+      - NAT_CONFIG_FILE=/app/configs/config.yml
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - labos-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  labos-net:
+    external: true

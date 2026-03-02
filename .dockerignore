@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env.secrets
+.env.secrets.example
+config.yaml
+config.yaml.example
+configure.py
+docker-compose.yml
+Dockerfile
+.dockerignore
+README.md
+logs/
+protocols/
+__pycache__/
+*.pyc
+.vscode/
+.idea/

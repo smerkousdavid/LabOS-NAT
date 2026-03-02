@@ -1,0 +1,57 @@
+# =============================================================================
+# LabOS NAT Server -- Agent Configuration
+#
+# Edit this file then run: python configure.py
+# Then: docker compose up -d
+# =============================================================================
+
+nat:
+  host: 0.0.0.0
+  port: 8002
+
+  video:
+    mode: rtsp_pull                     # websocket | rtsp_pull | mediamtx_relay | video_stream
+    mediamtx_url: rtsp://localhost:8554
+
+  forward_audio: false
+
+  session:
+    context_window_tokens: 6000
+    max_turns: 10
+    history_limit: 40
+    summarize_trigger_tokens: 7000
+    summary_target_tokens: 600
+
+  vsop:
+    provider: stella
+    polling_interval: 3
+    multi_frame:
+      count: 8
+      window_seconds: 10
+      resolution: 512
+      jpeg_quality: 70
+
+  tools:
+    vlm: { enabled: true }
+    vsop: { enabled: true }
+    web: { enabled: true }
+    code: { enabled: true }
+    datetime: { enabled: true }
+
+# ---------------------------------------------------------------------------
+# Model endpoints -- point to labos-models GPU server
+# ---------------------------------------------------------------------------
+models:
+  llm:
+    base_url: "http://llm:8001/v1"            # labos-models LLM (Docker service name on labos-net)
+    model: Qwen/Qwen3-32B-AWQ
+    api_key: not-needed
+    max_model_len: 8096
+
+  vlm:
+    base_url: "http://vlm:8500/v1"            # labos-models VLM (Docker service name on labos-net)
+    model: Zaixi/STELLA-VLM-32b
+    api_key: not-needed
+    max_model_len: 8096
+
+secrets_file: .env.secrets

@@ -1,0 +1,7 @@
+.env.secrets
+configs/config.yml
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+logs/

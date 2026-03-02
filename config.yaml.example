@@ -1,0 +1,32 @@
+# LabOS NAT Server Configuration -- copy to config.yaml and edit
+
+nat:
+  host: 0.0.0.0
+  port: 8002
+  video:
+    mode: websocket
+  session:
+    context_window_tokens: 6000
+    max_turns: 10
+    history_limit: 40
+    summarize_trigger_tokens: 7000
+  vsop:
+    provider: stella
+    polling_interval: 3
+  tools:
+    vlm: { enabled: true }
+    vsop: { enabled: true }
+    web: { enabled: true }
+    code: { enabled: true }
+    datetime: { enabled: true }
+
+# Point to your labos-models GPU server
+models:
+  llm:
+    base_url: "http://192.168.1.100:8001/v1"
+    model: Qwen/Qwen3-32B-AWQ
+  vlm:
+    base_url: "http://192.168.1.100:8500/v1"
+    model: Zaixi/STELLA-VLM-32b
+
+secrets_file: .env.secrets
