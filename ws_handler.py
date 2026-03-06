@@ -435,17 +435,100 @@ async def _emit_labos_monitoring(session_id: str, message: str):
 async def _handle_qr_payload(session_id: str, msg: dict, ws):
     """Process a QR code payload from the runtime to start a LabOS Live session."""
     payload = msg.get("payload", {})
-    if not isinstance(payload, dict) or payload.get("type") != "labos_live":
+    if isinstance(payload, str):
+        payload = json.loads(payload.strip())
+
+    if not isinstance(payload, dict):
         logger.warning(f"[WS] Invalid QR payload for {session_id[:8]}")
         return
 
-    ws_endpoint = payload.get("ws_endpoint", "")
-    labos_session_id = payload.get("session_id", "")
-    token = payload.get("token", "")
-    publish_rtsp = payload.get("publish_rtsp", "")
+    try:
+        payload_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    except Exception:
+        payload_text = str(payload)
+    logger.info(f"[WS] Raw QR payload for {session_id[:8]}: {payload_text}")
+    print(f"[WS] QR payload ({session_id[:8]}): {payload_text}", flush=True)
+
+    def _normalize_session_id(value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        try:
+            # Accept both compact 32-char hex and canonical UUID forms.
+            return str(uuid.UUID(raw))
+        except Exception:
+            return raw
+
+    is_compact = payload.get("t") == "ll"
+    join_error: Optional[str] = None
+    if is_compact:
+        host = str(payload.get("h", "")).strip()
+        rtsp_host = str(payload.get("r", "")).strip()
+        raw_session_id = str(payload.get("s", "")).strip()
+        join_key = str(payload.get("k", "")).strip()
+
+        if not host or not raw_session_id:
+            logger.warning(f"[WS] Invalid compact QR payload for {session_id[:8]}")
+            return
+
+        labos_session_id = _normalize_session_id(raw_session_id)
+        ws_endpoint = f"ws://{host}/ws/vlm/{labos_session_id}"
+        publish_rtsp = f"rtsp://{rtsp_host}/live/{labos_session_id}" if rtsp_host else ""
+        token = join_key
+
+        join_url = f"http://{host}/api/v2/live/sessions/{raw_session_id}/join"
+        try:
+            import httpx
+            headers = {"Content-Type": "application/json"}
+            # if join_key:
+            #     headers["Authorization"] = f"Bearer {join_key}"
+            #     headers["X-Session-Key"] = join_key
+            async with httpx.AsyncClient(timeout=8.0) as client_http:
+                response = await client_http.post(
+                    join_url,
+                    headers=headers,
+                    json={"token": join_key} if join_key else {},
+                )
+            if response.status_code >= 400:
+                join_error = f"Live join failed ({response.status_code})"
+                logger.warning(
+                    f"[WS] Live join failed ({response.status_code}) for {session_id[:8]}: {response.text[:200]}"
+                )
+            else:
+                logger.info(f"[WS] Live join succeeded for {session_id[:8]}")
+        except Exception as exc:
+            join_error = f"Live join request error: {exc}"
+            logger.warning(f"[WS] Live join request error for {session_id[:8]}: {exc}")
+    else:
+        if payload.get("type") != "labos_live":
+            logger.warning(f"[WS] Invalid QR payload for {session_id[:8]}")
+            return
+        ws_endpoint = payload.get("ws_endpoint", "")
+        labos_session_id = _normalize_session_id(str(payload.get("session_id", "")))
+        token = payload.get("token", "")
+        publish_rtsp = payload.get("publish_rtsp", "")
 
     if not ws_endpoint:
         logger.error(f"[WS] QR payload missing ws_endpoint for {session_id[:8]}")
+        return
+
+    if join_error:
+        err_text = (
+            "Live session inactive: failed to join. "
+            "Please rescan QR or restart the live session."
+        )
+        await ws.send_json({
+            "type": "notification",
+            "text": err_text,
+            "tts": True,
+        })
+        await ws.send_json({
+            "type": "session_connect_failed",
+            "session_id": labos_session_id,
+            "error": join_error,
+        })
+        from tools.display.ui import render_qr_scanning
+        await render_qr_scanning()
         return
 
     logger.info(f"[WS] QR payload received: session={labos_session_id}, endpoint={ws_endpoint}")

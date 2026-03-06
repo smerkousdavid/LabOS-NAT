@@ -77,13 +77,27 @@ class LabOSLiveClient:
             headers = {}
             if self._token:
                 headers["Authorization"] = f"Bearer {self._token}"
-            self._ws = await websockets.client.connect(
-                self._ws_endpoint,
-                additional_headers=headers,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
-            )
+            base_kwargs = {
+                "ping_interval": 20,
+                "ping_timeout": 10,
+                "close_timeout": 5,
+            }
+            try:
+                # websockets>=13 uses additional_headers.
+                self._ws = await websockets.client.connect(
+                    self._ws_endpoint,
+                    additional_headers=headers,
+                    **base_kwargs,
+                )
+            except TypeError as exc:
+                if "additional_headers" not in str(exc):
+                    raise
+                # websockets<=12 uses extra_headers.
+                self._ws = await websockets.client.connect(
+                    self._ws_endpoint,
+                    extra_headers=headers,
+                    **base_kwargs,
+                )
             self._connected = True
             self._receive_task = asyncio.create_task(self._receive_loop())
             logger.info(f"[LabOSLive] Connected to {self._ws_endpoint}")
@@ -185,6 +199,7 @@ class LabOSLiveClient:
     async def _receive_loop(self):
         try:
             async for raw in self._ws:
+                print(f"[LabOSLive] Received: {raw}", flush=True)
                 try:
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):

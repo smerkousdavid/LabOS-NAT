@@ -54,6 +54,11 @@ class FastCommand(TypedDict):
     command: str  # "next_step" | "previous_step"
 
 
+class QrPayload(TypedDict):
+    type: Literal["qr_payload"]
+    payload: Dict[str, Any]
+
+
 class Ping(TypedDict):
     type: Literal["ping"]
 
@@ -107,6 +112,22 @@ class ToolCall(TypedDict):
     status: str  # "started" | "completed" | "failed"
 
 
+class SessionConnected(TypedDict):
+    type: Literal["session_connected"]
+    session_id: str
+    publish_rtsp: str
+
+
+class SessionConnectFailed(TypedDict):
+    type: Literal["session_connect_failed"]
+    session_id: str
+    error: str
+
+
+class SessionCleared(TypedDict):
+    type: Literal["session_cleared"]
+
+
 # ---- Robot Runtime -> NAT Server ---------------------------------------------
 
 class RobotRegister(TypedDict):
@@ -134,12 +155,12 @@ class RobotExecute(TypedDict):
 
 # ---- Type unions for dispatch ------------------------------------------------
 
-InboundMessage = UserMessage | FrameResponse | AudioStream | VideoStream | StreamInfo | ProtocolPush | FastCommand | Ping
-OutboundMessage = AgentResponse | Notification | DisplayUpdate | RequestFrames | TtsOnly | WakeTimeout | Pong | ToolCall
+InboundMessage = UserMessage | FrameResponse | AudioStream | VideoStream | StreamInfo | ProtocolPush | FastCommand | QrPayload | Ping
+OutboundMessage = AgentResponse | Notification | DisplayUpdate | RequestFrames | TtsOnly | WakeTimeout | Pong | ToolCall | SessionConnected | SessionConnectFailed | SessionCleared
 
 # All valid type strings
-INBOUND_TYPES = {"user_message", "frame_response", "audio_stream", "video_stream", "stream_info", "protocol_push", "fast_command", "ping"}
-OUTBOUND_TYPES = {"agent_response", "notification", "display_update", "request_frames", "tts_only", "wake_timeout", "pong", "tool_call"}
+INBOUND_TYPES = {"user_message", "frame_response", "audio_stream", "video_stream", "stream_info", "protocol_push", "fast_command", "qr_payload", "ping"}
+OUTBOUND_TYPES = {"agent_response", "notification", "display_update", "request_frames", "tts_only", "wake_timeout", "pong", "tool_call", "session_connected", "session_connect_failed", "session_cleared"}
 
 ROBOT_INBOUND_TYPES = {"robot_register", "robot_result"}
 ROBOT_OUTBOUND_TYPES = {"robot_execute"}
