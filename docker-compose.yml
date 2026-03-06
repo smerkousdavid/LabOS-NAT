@@ -10,6 +10,8 @@ services:
       - ./protocols:/app/protocols
       - ./configs:/app/configs
       - ./ws_protocol.py:/app/ws_protocol.py:ro
+      - ./ws_handler.py:/app/ws_handler.py:ro
+      - ./labos_live_client.py:/app/labos_live_client.py:ro
       - ./logs:/app/logs
     environment:
       - NAT_CONFIG_FILE=/app/configs/config.yml
