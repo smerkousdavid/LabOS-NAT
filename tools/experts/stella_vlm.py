@@ -16,15 +16,14 @@ from tools.common.toggle import toggle_dashboard
 @toggle_dashboard("query_stella")
 async def query_stella(
     question: Annotated[str, Field(
-        description="Question about the experiment, what the camera sees, "
-        "technique guidance, reagent identification, or safety assessment"
+        description="Visual question requiring the live camera feed -- "
+        "e.g. identifying objects, checking setup, assessing cell cultures, reading labels"
     )]
 ) -> str:
-    """Ask STELLA-VLM about what the user is looking at. STELLA is a specialized
-    vision-language model that can see the user's live camera feed and has
-    deep knowledge of laboratory protocols. Works at ALL times -- with or
-    without a running protocol. Route visual questions, environment questions,
-    technique questions, and domain-expert questions here."""
+    """Ask STELLA-VLM about what the camera sees RIGHT NOW. Only use for
+    visual questions requiring live camera feed analysis: identifying objects,
+    checking equipment setup, assessing cell cultures, reading labels, etc.
+    Do NOT use for general protocol questions -- answer those directly."""
     from tools.vsop_providers import get_vsop_provider, init_vsop_provider
     from config import get_config
 

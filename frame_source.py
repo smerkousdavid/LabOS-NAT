@@ -4,11 +4,12 @@ Implementations behind a common FrameSource interface:
   - WebSocketFrameSource     (request frames over WS)
   - RtspFrameSource          (pull from RTSP via OpenCV)
   - VideoStreamFrameSource   (read from WS video_stream ring buffer)
-  - BufferedFrameSource      (reads from BackgroundFrameBuffer)
+  - BufferedFrameSource      (reads from BackgroundFrameBuffer or PushFrameBuffer)
 
-BackgroundFrameBuffer runs a background asyncio task that continuously
-pulls frames from RTSP at ~2 fps into a timestamped deque, so that
-get_frames() returns instantly without any network round-trip.
+PushFrameBuffer accepts frames pushed over WebSocket into a timestamped
+deque. get_frames() samples by timestamp -- no network round-trip.
+
+BackgroundFrameBuffer (legacy) runs a background RTSP ingest loop.
 
 Factory: create_frame_source(config, session_id)
 """
@@ -164,6 +165,72 @@ class BackgroundFrameBuffer:
         return base64.b64encode(jpeg_buf.tobytes()).decode("ascii")
 
 
+# ---------------------------------------------------------------------------
+# Push-based frame buffer (receives frames over WebSocket)
+# ---------------------------------------------------------------------------
+
+class PushFrameBuffer:
+    """Timestamped ring buffer fed by WebSocket ``video_stream`` messages.
+
+    The runtime pushes base64 JPEG frames; ``ws_handler`` calls ``push()``
+    for each one.  ``get_frames()`` samples the buffer by timestamp spacing,
+    identical to ``BackgroundFrameBuffer``.
+    """
+
+    _FPS = 2
+    _MAXLEN = 120  # ~1 min at 2 fps
+
+    def __init__(self) -> None:
+        self._buf: collections.deque[Tuple[float, str]] = collections.deque(maxlen=self._MAXLEN)
+
+    @property
+    def size(self) -> int:
+        return len(self._buf)
+
+    def push(self, frame_b64: str) -> None:
+        """Append a base64-encoded JPEG with the current timestamp."""
+        self._buf.append((time.monotonic(), frame_b64))
+
+    async def stop(self) -> None:
+        """Matches BackgroundFrameBuffer interface for cleanup."""
+        self._buf.clear()
+
+    def get_frames(self, count: int = 8, interval_ms: int = 1250) -> List[str]:
+        """Return *count* frames spaced ~interval_ms apart (by timestamp)."""
+        if not self._buf:
+            return []
+
+        snapshot = list(self._buf)
+
+        if len(snapshot) <= count:
+            return [frame for _, frame in snapshot]
+
+        interval_sec = interval_ms / 1000.0
+        latest_ts = snapshot[-1][0]
+        target_start = latest_ts - interval_sec * (count - 1)
+
+        selected: List[str] = []
+        target_ts = target_start
+        idx = 0
+        for _ in range(count):
+            best_idx = idx
+            best_diff = abs(snapshot[idx][0] - target_ts)
+            for j in range(idx + 1, len(snapshot)):
+                diff = abs(snapshot[j][0] - target_ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_idx = j
+                elif snapshot[j][0] > target_ts + interval_sec:
+                    break
+            selected.append(snapshot[best_idx][1])
+            idx = best_idx + 1
+            if idx >= len(snapshot):
+                idx = len(snapshot) - 1
+            target_ts += interval_sec
+
+        return selected
+
+
 class FrameSource(ABC):
     """Abstract base for video frame acquisition."""
 
@@ -264,9 +331,9 @@ class VideoStreamFrameSource(FrameSource):
 
 
 class BufferedFrameSource(FrameSource):
-    """Reads from a running BackgroundFrameBuffer -- instant return."""
+    """Reads from a running frame buffer (push or background) -- instant return."""
 
-    def __init__(self, buffer: BackgroundFrameBuffer):
+    def __init__(self, buffer: "BackgroundFrameBuffer | PushFrameBuffer"):
         self._buffer = buffer
 
     async def get_frames(self, count: int = 8, interval_ms: int = 1250) -> List[str]:

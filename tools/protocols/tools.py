@@ -6,6 +6,7 @@ navigating, and clearing errors.
 """
 
 import hashlib
+import re
 import time
 from datetime import datetime
 from typing import Annotated, Optional
@@ -37,6 +38,10 @@ Rules:
 - Use direct action language.
 - Do NOT add generic filler like "make sure your workspace is clean" unless required by the specific step.
 - Prefer concrete specifics (what to pick up, what to record, where to place).
+- Return strict JSON only (ASCII), no markdown, no code fences.
+- Escape any double quotes inside values.
+- Keep each object shape EXACTLY: {"description": "...", "common_errors": ["..."]}.
+- Do not include trailing commas, comments, or extra keys.
 
 Examples:
 - Step text: "Weight 5 PCR tubes"
@@ -68,16 +73,33 @@ Source protocol file:
 {raw_protocol}
 
 Rules:
-- Keep step text short and action-oriented (5-18 words each).
-- Merge verbose subtext into a single compact step when possible.
-- Preserve order and critical constraints (volumes, times, temperatures, counts).
+- Each step has "text" (short action label, 10 words MAX) and "detail" (full specifics, 1-3 sentences).
+- "text" is spoken aloud by TTS -- keep it brief, natural, and TTS-friendly.
+- In "text", expand units/acronyms for speech: "5g" -> "5 grams", "10ml" -> "10 milliliters", "uL" -> "microliters". Spell out single letters: "F1" -> "F-1".
+- "detail" MUST preserve ALL specific identifiers: tube labels, reagent names, volumes, temperatures, counts, times, concentrations.
+- "detail" includes practical guidance, warnings, and the identifiers that were omitted from "text".
+- Preserve order and critical constraints.
 - Exclude decorative or repeated prose.
 - Keep 3-20 steps total.
 - The source may use XML/HTML tags -- extract only the actionable steps and context, never include markup tags in the output.
 
+Example step:
+{{
+  "text": "Label five P-C-R tubes and mix tube",
+  "detail": "Label tubes as F1/R1, F2/R2, F3/R3, F4/R4, F5/R5, and label the 0.5 mL tube for the mix. Do this before adding any liquid so you do not mix up reactions later."
+}}
+
+Another example:
+{{
+  "text": "Add reagents to the mix tube",
+  "detail": "In the 0.5 mL tube, add 5 uL 5X QS buffer, 5 uL 5X G/C buffer, 0.5 uL each primer, 0.5 uL dNTPs, 0.25 uL Q5Pol*HS, and 13.25 uL pDNA. Multiply by number of reactions plus 10 percent if making a master mix."
+}}
+
 Return ONLY valid JSON, no markdown:
 {{
-  "steps": ["..."],
+  "steps": [
+    {{"text": "short action label (10 words max)", "detail": "full specifics with all identifiers and guidance"}}
+  ],
   "context": {{
     "goal": "one sentence",
     "materials": ["..."],
@@ -89,6 +111,26 @@ Return ONLY valid JSON, no markdown:
   }}
 }}\
 """
+
+_ROBOT_TAG_RE = re.compile(r"\s*\[robot:([^\]]+)\]\s*", re.IGNORECASE)
+_ROBOT_NL_RE = re.compile(
+    r"\s*\(run\s+robot\s+protocol\s+[\"']([^\"']+)[\"']\)\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_robot_annotation(step_text: str) -> tuple:
+    """Extract ``[robot:name]`` or ``(run robot protocol "name")`` from step text.
+
+    Returns ``(clean_text, robot_protocol_name | None)``.
+    """
+    for pattern in (_ROBOT_TAG_RE, _ROBOT_NL_RE):
+        m = pattern.search(step_text)
+        if m:
+            clean = step_text[:m.start()] + step_text[m.end():]
+            return clean.strip(), m.group(1).strip()
+    return step_text, None
+
 
 ERROR_COOLDOWN_SECONDS = 5.0
 _ORDINAL_TO_NUM = {
@@ -125,7 +167,12 @@ Return ONLY JSON with this schema:
 Rules:
 - If no data to capture, return {{"captures":[]}}.
 - Keep values short and normalized.
-- Prefer section names: tube_weights, timings, temperatures, volumes, notes.
+- Prefer section names: tube_weights, timings, temperatures, volumes, notes, observations.
+- For free-form observations (e.g. "petri dish looks dead", "colonies look bad",
+  "nothing grew in dish 3", "the phone is kind of heavy", "log, but X"),
+  use section "observations" with row {{"note": "<observation>"}}.
+- Text often comes from noisy STT. "log, but the phone is heavy" means the user
+  said "log that the phone is heavy". Always extract the observation even if garbled.
 """
 
 FINAL_DATA_RICHTEXT_PROMPT = """\
@@ -144,11 +191,115 @@ Requirements:
 - No markdown.
 """
 
+PROTOCOL_SUMMARY_PROMPT = """\
+Summarize this completed protocol run in 4-5 sentences for display on AR glasses.
+
+Protocol: {protocol_name}
+Duration: {duration}
+Steps completed: {completed_count}/{total_steps}
+Errors: {error_count}
+
+Observation history:
+{observation_history}
+
+Experiment data:
+{experiment_data}
+
+Error log:
+{error_log}
+
+Rules:
+- 4-5 sentences, no filler or flowery language.
+- Mention the protocol name, how long it took, and whether all steps were completed.
+- Highlight any errors or notable observations.
+- If experiment data was logged, mention key findings.
+- Be factual and concise.
+"""
+
+
+async def generate_protocol_summary(state) -> tuple[str, str]:
+    """Generate a protocol summary using the reasoning LLM.
+
+    Returns (plain_text, rich_text) where rich_text uses TMP tags for the AR panel.
+    """
+    import asyncio
+    from config import get_reason_llm_client
+
+    duration_s = int(time.time() - state.start_time) if state.start_time else 0
+    minutes, seconds = divmod(duration_s, 60)
+    duration = f"{minutes}m {seconds}s"
+
+    obs_lines = []
+    for h in (state.monitoring_high or []):
+        obs_lines.append(f"[30min summary] {h}")
+    for m in (state.monitoring_medium or []):
+        obs_lines.append(f"[2min summary] {m}")
+    recent = (state.monitoring_granular or [])[-6:]
+    for g in recent:
+        obs_lines.append(f"[recent] {g}")
+    observation_history = "\n".join(obs_lines) if obs_lines else "(none)"
+
+    experiment_data = state.experiment_data_xml() if hasattr(state, "experiment_data_xml") else "(none)"
+
+    error_lines = []
+    for err in (state.error_history or []):
+        error_lines.append(f"Step {err.get('step', '?')}: {err.get('detail', 'unknown')}")
+    error_log = "\n".join(error_lines) if error_lines else "(none)"
+
+    prompt = PROTOCOL_SUMMARY_PROMPT.format(
+        protocol_name=state.protocol_name or "Unknown",
+        duration=duration,
+        completed_count=len(state.completed_steps),
+        total_steps=len(state.steps),
+        error_count=len(state.error_history),
+        observation_history=observation_history,
+        experiment_data=experiment_data,
+        error_log=error_log,
+    )
+
+    def _call_sync():
+        client, model = get_reason_llm_client()
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=400,
+        )
+
+    plain_text = ""
+    try:
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, _call_sync)
+        plain_text = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning(f"Protocol summary LLM call failed: {exc}")
+
+    if not plain_text:
+        plain_text = (
+            f"Completed {state.protocol_name} in {duration}. "
+            f"{len(state.completed_steps)}/{len(state.steps)} steps done. "
+            f"{len(state.error_history)} errors logged. "
+            f"{len((state.experiment_data or {}).get('sections', {}))} data sections captured."
+        )
+
+    rich_text = (
+        f'<size=22><color=#59D2FF><b>Protocol Summary</b></color></size><br>'
+        f'<size=18><b>{state.protocol_name}</b></size><br>'
+        f'<size=15><color=#AAAAAA>Duration: {duration} | '
+        f'Steps: {len(state.completed_steps)}/{len(state.steps)} | '
+        f'Errors: {len(state.error_history)}</color></size><br><br>'
+        f'<size=16><color=#DDDDDD>{plain_text}</color></size><br><br>'
+        f'<size=14><color=#999999>You can ask about observations, errors, or data. '
+        f'Returning to main menu in 1 minute.</color></size>'
+    )
+
+    return plain_text, rich_text
+
 
 async def _enrich_steps_via_llm(protocol_name: str, step_texts: list) -> list:
-    """Call the router LLM once to generate descriptions and common errors."""
+    """Call reason_llm (Gemini) to generate descriptions and common errors."""
     import asyncio, json, re
-    from config import get_llm_client
+    from config import get_reason_llm_client
 
     steps_block = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(step_texts))
     prompt = STEP_ENRICHMENT_PROMPT.format(
@@ -156,29 +307,127 @@ async def _enrich_steps_via_llm(protocol_name: str, step_texts: list) -> list:
         steps_block=steps_block,
     )
 
+    def _defaults() -> list:
+        return [{"description": "", "common_errors": []} for _ in step_texts]
+
+    def _normalize_entries(data: list) -> list:
+        normalized = []
+        for item in data:
+            if not isinstance(item, dict):
+                normalized.append({"description": "", "common_errors": []})
+                continue
+            desc = str(item.get("description", "") or "").replace("\n", " ").strip()
+            if len(desc) > 220:
+                desc = desc[:220].rstrip() + "..."
+            raw_errors = item.get("common_errors", [])
+            if isinstance(raw_errors, str):
+                raw_errors = [raw_errors]
+            errors = []
+            if isinstance(raw_errors, list):
+                for e in raw_errors[:2]:
+                    txt = str(e or "").replace("\n", " ").strip()
+                    if txt:
+                        errors.append(txt[:120])
+            normalized.append({"description": desc, "common_errors": errors})
+
+        if len(normalized) < len(step_texts):
+            normalized.extend([{"description": "", "common_errors": []}] * (len(step_texts) - len(normalized)))
+        return normalized[:len(step_texts)]
+
+    def _extract_balanced_array(text: str) -> str:
+        start = text.find("[")
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return ""
+
+    def _parse_from_candidates(raw: str) -> list | None:
+        candidates = []
+        direct = raw.strip()
+        if direct:
+            candidates.append(direct)
+
+        for m in re.finditer(r"```(?:json)?\s*(.*?)```", raw, re.DOTALL | re.IGNORECASE):
+            block = (m.group(1) or "").strip()
+            if block:
+                candidates.append(block)
+
+        bracket = _extract_balanced_array(raw)
+        if bracket:
+            candidates.append(bracket)
+
+        for cand in candidates:
+            try:
+                parsed = json.loads(cand)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                continue
+        return None
+
+    def _repair_json_sync(bad_raw: str):
+        client, model = get_reason_llm_client()
+        repair_prompt = (
+            "Fix this malformed JSON into a valid JSON array.\n"
+            "Return ONLY a JSON array where each element is an object with EXACTLY:\n"
+            "{\"description\": string, \"common_errors\": [string, ...]}\n"
+            "No markdown, no extra keys, no commentary.\n\n"
+            f"Malformed input:\n{bad_raw}"
+        )
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": repair_prompt}],
+            temperature=0.0,
+            max_tokens=1200,
+        )
+
     def _call_sync():
-        client, model = get_llm_client("router")
+        client, model = get_reason_llm_client()
         return client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=2048,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     try:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, _call_sync)
         raw = response.choices[0].message.content.strip()
-        json_match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-            if isinstance(data, list) and len(data) >= len(step_texts):
-                return data[:len(step_texts)]
+        parsed = _parse_from_candidates(raw)
+        if parsed is not None:
+            return _normalize_entries(parsed)
+
+        logger.warning("Step enrichment parse failed; attempting JSON repair pass.")
+        repaired_resp = await loop.run_in_executor(None, lambda: _repair_json_sync(raw[:6000]))
+        repaired_raw = (repaired_resp.choices[0].message.content or "").strip()
+        repaired = _parse_from_candidates(repaired_raw)
+        if repaired is not None:
+            return _normalize_entries(repaired)
     except Exception as exc:
         logger.warning(f"Step enrichment LLM call failed: {exc}")
 
-    return [{"description": "", "common_errors": []} for _ in step_texts]
+    return _defaults()
 
 
 def _build_protocol_context_text(context: dict) -> str:
@@ -219,7 +468,7 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
     import asyncio
     import json
     import re
-    from config import get_llm_client
+    from config import get_reason_llm_client
 
     raw = (raw_protocol or "").strip()
     if not raw:
@@ -232,16 +481,15 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
     )
 
     def _call_sync():
-        client, model = get_llm_client("router")
+        client, model = get_reason_llm_client()
         return client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=1400,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            max_tokens=2400,
         )
 
-    compact_steps = list(fallback_steps or [])
+    compact_steps: list[dict | str] = list(fallback_steps or [])
     context_text = ""
     try:
         loop = asyncio.get_running_loop()
@@ -253,7 +501,15 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
             if isinstance(data, dict):
                 steps = data.get("steps")
                 if isinstance(steps, list):
-                    cleaned = [str(s).strip() for s in steps if str(s).strip()]
+                    cleaned = []
+                    for s in steps:
+                        if isinstance(s, dict) and s.get("text"):
+                            cleaned.append({
+                                "text": str(s["text"]).strip(),
+                                "detail": str(s.get("detail", "")).strip(),
+                            })
+                        elif isinstance(s, str) and s.strip():
+                            cleaned.append(s.strip())
                     if cleaned:
                         compact_steps = cleaned[:20]
                 context_text = _build_protocol_context_text(data.get("context") or {})
@@ -266,15 +522,25 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
     return {"steps": compact_steps, "context_text": context_text}
 
 
-def _quick_compact_steps(step_texts: list[str]) -> list[str]:
+def _quick_compact_steps(step_texts: list[str]) -> list[tuple[str, str]]:
+    """Return list of (short_label, full_detail) tuples.
+
+    short_label: first ~60 chars (sentence-boundary aware) for TTS/step list.
+    full_detail: the complete original text for the description panel.
+    """
     compact = []
     for step in step_texts:
-        text = " ".join(str(step).split()).strip()
-        if not text:
+        full = " ".join(str(step).split()).strip()
+        if not full:
             continue
-        if len(text) > 90:
-            text = text[:90].rstrip() + "..."
-        compact.append(text)
+        if len(full) <= 60:
+            compact.append((full, full))
+        else:
+            cut = full[:60]
+            last_space = cut.rfind(" ")
+            if last_space > 30:
+                cut = cut[:last_space]
+            compact.append((cut.rstrip(",;:") + "...", full))
     return compact[:20]
 
 
@@ -290,6 +556,11 @@ def _init_experiment_data(state: ProtocolState) -> None:
 def _record_capture(state: ProtocolState, section: str, row: dict) -> bool:
     if not section:
         return False
+
+    if isinstance(row, dict):
+        row.setdefault("_step", str(state.current_step))
+        row.setdefault("_timestamp", datetime.utcnow().strftime("%H:%M:%S"))
+
     payload = f"{section}|{row}"
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()
     if digest in state.data_capture_hashes:
@@ -309,6 +580,14 @@ def _record_capture(state: ProtocolState, section: str, row: dict) -> bool:
         bucket["rows"].append({k: str(v) for k, v in row.items()})
     else:
         bucket["rows"].append(str(row))
+
+    try:
+        import asyncio
+        asyncio.ensure_future(_emit_labos_protocol_data(
+            state.protocol_name, {section: row if isinstance(row, dict) else str(row)}
+        ))
+    except Exception:
+        pass
     return True
 
 
@@ -344,19 +623,18 @@ async def _extract_with_llm(state: ProtocolState, utterance: str) -> list[dict]:
     import asyncio
     import json
     import re
-    from config import get_llm_client
+    from config import get_reason_llm_client
 
     current_text = ""
     if 1 <= state.current_step <= len(state.steps):
         current_text = state.steps[state.current_step - 1].text
     def _call_sync():
-        client, model = get_llm_client("router")
+        client, model = get_reason_llm_client()
         return client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=240,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     try:
@@ -429,23 +707,48 @@ async def _refine_steps_background(
     """Refine step details asynchronously after protocol starts."""
     try:
         compacted = await _compact_protocol_via_llm(protocol_name, raw_protocol, fallback_steps)
-        refined_steps = compacted["steps"] or fallback_steps
-        if refined_steps:
-            # Ask the manager LLM to sanity-check major drift in parsed step sets.
+        raw_steps = compacted["steps"] or fallback_steps
+
+        refined_texts: list[str] = []
+        compacted_details: list[str] = []
+        for s in raw_steps:
+            if isinstance(s, dict):
+                refined_texts.append(str(s.get("text", "")).strip())
+                compacted_details.append(str(s.get("detail", "")).strip())
+            else:
+                refined_texts.append(str(s).strip())
+                compacted_details.append("")
+
+        if refined_texts:
             try:
-                await _manager_double_check_steps(protocol_name, [s.text for s in state.steps], refined_steps)
+                await _manager_double_check_steps(protocol_name, [s.text for s in state.steps], refined_texts)
             except Exception:
                 pass
+
+        if not state.is_active or state.protocol_name != protocol_name:
+            return
+
+        # Update step texts and pre-populate descriptions from compaction detail
+        for i, step in enumerate(state.steps):
+            if i < len(refined_texts) and refined_texts[i]:
+                step.text = refined_texts[i]
+            if i < len(compacted_details) and compacted_details[i]:
+                step.description = compacted_details[i]
+
+        # Also update the provider's internal step list so TTS uses the full text
+        if hasattr(provider, "_steps") and refined_texts:
+            provider._steps = refined_texts[:len(provider._steps)]
+
         stable_step_texts = [s.text for s in state.steps] or list(fallback_steps or [])
         enrichments = await _enrich_steps_via_llm(protocol_name, stable_step_texts)
 
         if not state.is_active or state.protocol_name != protocol_name:
             return
 
-        # Keep startup step text stable; only enrich metadata/context in background.
         for i, step in enumerate(state.steps):
             enrich = enrichments[i] if i < len(enrichments) else {}
-            step.description = enrich.get("description", step.description)
+            if not step.description and enrich.get("description"):
+                step.description = enrich["description"]
             step.common_errors = enrich.get("common_errors", step.common_errors)
 
         if compacted.get("context_text"):
@@ -470,7 +773,7 @@ async def _manager_double_check_steps(
     candidate_steps: list[str],
 ) -> None:
     import asyncio
-    from config import get_llm_client
+    from config import get_reason_llm_client
 
     if not baseline_steps or not candidate_steps:
         return
@@ -490,13 +793,12 @@ async def _manager_double_check_steps(
     )
 
     def _call_sync():
-        client, model = get_llm_client("router")
+        client, model = get_reason_llm_client()
         return client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=120,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     loop = asyncio.get_running_loop()
@@ -509,7 +811,7 @@ async def _manager_double_check_steps(
 async def format_experiment_data_rich_text(state: ProtocolState) -> str:
     """Format experiment_data for final panel with LLM, fallback deterministic."""
     import asyncio
-    from config import get_llm_client
+    from config import get_reason_llm_client
 
     xml = state.experiment_data_xml()
     prompt = FINAL_DATA_RICHTEXT_PROMPT.format(
@@ -519,13 +821,12 @@ async def format_experiment_data_rich_text(state: ProtocolState) -> str:
     )
 
     def _call_sync():
-        client, model = get_llm_client("router")
+        client, model = get_reason_llm_client()
         return client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=380,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
     try:
@@ -624,12 +925,16 @@ async def start_protocol(
 
     if proto:
         fallback_steps = list(proto.get("steps", []))
-        step_texts = _quick_compact_steps(fallback_steps)
-        if not step_texts:
-            step_texts = ["Prepare protocol according to source document."]
+        compacted_pairs = _quick_compact_steps(fallback_steps)
+        if not compacted_pairs:
+            compacted_pairs = [("Prepare protocol according to source document.", "Prepare protocol according to source document.")]
 
-        # Fast baseline: STELLA starts with concise steps immediately.
-        step_details = [StepDetail(text=t, description=t) for t in step_texts]
+        step_texts = [short for short, _full in compacted_pairs]
+
+        step_details = []
+        for short_label, full_detail in compacted_pairs:
+            clean, robot_proto = _extract_robot_annotation(short_label)
+            step_details.append(StepDetail(text=clean, description=full_detail, robot_protocol=robot_proto))
 
         state.is_active = True
         state.mode = "running"
@@ -654,6 +959,8 @@ async def start_protocol(
         )
 
         await viture_ui.render_step_panel(state)
+
+        await _emit_labos_protocol_start(state)
 
         # Refine details/context in background without delaying startup.
         try:
@@ -686,12 +993,14 @@ async def start_protocol(
 
     step_details = []
     for t in raw_steps:
-        step_details.append(StepDetail(text=t))
+        clean, robot_proto = _extract_robot_annotation(t)
+        step_details.append(StepDetail(text=clean, robot_protocol=robot_proto))
     state.steps = step_details
     state.current_step = status.get("current_step", 1)
 
     if state.steps:
         await viture_ui.render_step_panel(state)
+        await _emit_labos_protocol_start(state)
     return resp
 
 
@@ -714,12 +1023,11 @@ async def stop_protocol() -> str:
         return "No protocol is currently being monitored."
 
     resp = await provider.stop()
-    state.reset()
-    get_context_manager().set_context("main_menu")
-
-    store = get_protocol_store()
-    await viture_ui.render_protocol_list(store)
-    return resp + " Say 'list protocols' to start another."
+    state.is_active = False
+    state.mode = "completed"
+    from tools.protocols.events import complete_protocol_run
+    await complete_protocol_run(state, completion_tts_prefix="Protocol finished.")
+    return resp + " Showing protocol summary."
 
 
 @function_tool
@@ -844,19 +1152,53 @@ async def get_protocol_status() -> str:
 
 
 @function_tool
+@toggle_dashboard("log_observation")
+async def log_observation(
+    observation: Annotated[str, Field(description="The observation or data point to record, e.g. 'phone is heavy', 'colonies look dead in dish 3'")],
+    section: Annotated[str, Field(description="Category: observations, tube_weights, timings, temperatures, volumes, notes")] = "observations",
+) -> str:
+    """Log an observation or data point for the current protocol run.
+    Use when user says log, note, record, or describes something noteworthy.
+    The data is saved with the current step number and timestamp."""
+    state = get_protocol_state()
+    if not state.is_active or state.mode != "running":
+        return "No protocol is currently running."
+
+    row = {"note": observation.strip()}
+    if _record_capture(state, section, row):
+        state.extra_context = (state.extra_context or "").strip()
+        if state.extra_context:
+            state.extra_context += "\n\n"
+        state.extra_context += state.experiment_data_xml()
+        step_info = f"step {state.current_step}" if state.current_step else "current step"
+        return f"Logged at {step_info}: {observation.strip()}"
+    return "Already recorded that observation."
+
+
+@function_tool
 @toggle_dashboard("query_completed_protocol_data")
 async def query_completed_protocol_data(
     protocol_name: Annotated[str, Field(description="Optional protocol name filter, or leave blank for latest")] = "",
 ) -> str:
-    """Query experiment data captured from completed protocols in this session."""
+    """Query experiment data captured during this session (current or completed runs)."""
     state = get_protocol_state()
+
+    if state.is_active and state.experiment_data.get("sections"):
+        sections = state.experiment_data["sections"]
+        section_names = ", ".join(sections.keys())
+        rows_total = sum(len(s.get("rows", [])) for s in sections.values())
+        return (
+            f"Current run ({state.protocol_name}): {rows_total} entries across sections: {section_names}. "
+            "Say 'show experiment data' with a section name for details."
+        )
+
     runs = list(state.completed_runs)
     if protocol_name:
         q = protocol_name.lower().strip()
         runs = [r for r in runs if q in str(r.get("protocol_name", "")).lower()]
 
     if not runs:
-        return "No completed protocol data found in this session."
+        return "No experiment data found for this session."
 
     latest = runs[-1]
     pname = latest.get("protocol_name", "Unknown")
@@ -873,26 +1215,32 @@ async def query_completed_protocol_data(
 @function_tool
 @toggle_dashboard("show_experiment_data")
 async def show_experiment_data(
-    section: Annotated[str, Field(description="Section name like tube_weights, timings, temperatures, volumes, notes")] = "",
+    section: Annotated[str, Field(description="Section name like tube_weights, timings, temperatures, volumes, notes, observations")] = "",
 ) -> str:
-    """Show captured experiment data details for the latest completed run in this session."""
+    """Show captured experiment data for the current or latest completed run."""
     state = get_protocol_state()
-    if not state.completed_runs:
-        return "No completed protocol data found in this session."
 
-    latest = state.completed_runs[-1]
-    sections = latest.get("experiment_data", {}).get("sections", {})
+    sections: dict = {}
+    source_label = ""
+    if state.is_active and state.experiment_data.get("sections"):
+        sections = state.experiment_data["sections"]
+        source_label = f"current run ({state.protocol_name})"
+    elif state.completed_runs:
+        latest = state.completed_runs[-1]
+        sections = latest.get("experiment_data", {}).get("sections", {})
+        source_label = f"completed run ({latest.get('protocol_name', 'Unknown')})"
+
     if not isinstance(sections, dict) or not sections:
-        return "No experiment data was captured in the latest completed run."
+        return "No experiment data found for this session."
 
     if section:
         key = section.strip().lower().replace(" ", "_")
         payload = sections.get(key)
         if not payload:
-            return f"Section '{section}' was not found in the latest completed run."
+            return f"Section '{section}' was not found in {source_label}."
         headers = payload.get("headers", [])
         rows = payload.get("rows", [])
-        lines = [f"{key}:"]
+        lines = [f"{key} ({source_label}):"]
         if headers:
             lines.append(", ".join(headers))
         for row in rows[:12]:
@@ -904,7 +1252,7 @@ async def show_experiment_data(
         return "\n".join(lines)
 
     names = ", ".join(sections.keys())
-    return f"Available experiment data sections: {names}."
+    return f"Available data sections in {source_label}: {names}."
 
 
 @function_tool
@@ -1001,3 +1349,47 @@ async def detailed_step(
     viture_ui.set_display_mode("overlay")
     await viture_ui._push_panel(blocks)
     return f"Detailed view for step {num} displayed. Say 'show steps' to return."
+
+
+# ---------------------------------------------------------------------------
+# LabOS Live event helpers (no-op when not connected)
+# ---------------------------------------------------------------------------
+
+async def _emit_labos_protocol_start(state: ProtocolState):
+    try:
+        from labos_live_client import get_labos_client
+        from config import _current_session_id
+        client = get_labos_client(_current_session_id.get("default-xr-session"))
+        if client and client.connected:
+            steps = []
+            for i, s in enumerate(state.steps):
+                steps.append({
+                    "step": i + 1,
+                    "short": s.text,
+                    "long": s.description or s.text,
+                })
+            await client.send_protocol_start(state.protocol_name, steps)
+    except Exception:
+        pass
+
+
+async def _emit_labos_protocol_stop_event():
+    try:
+        from labos_live_client import get_labos_client
+        from config import _current_session_id
+        client = get_labos_client(_current_session_id.get("default-xr-session"))
+        if client and client.connected:
+            await client.send_protocol_stop()
+    except Exception:
+        pass
+
+
+async def _emit_labos_protocol_data(protocol_name: str, data: dict):
+    try:
+        from labos_live_client import get_labos_client
+        from config import _current_session_id
+        client = get_labos_client(_current_session_id.get("default-xr-session"))
+        if client and client.connected:
+            await client.send_protocol_data(protocol_name, data)
+    except Exception:
+        pass

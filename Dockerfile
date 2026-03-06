@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py agent.py config.py frame_source.py ws_handler.py ws_protocol.py ./
+COPY server.py agent.py config.py frame_source.py ws_handler.py ws_protocol.py labos_live_client.py ./
 COPY configs/ ./configs/
 COPY context/ ./context/
 COPY tools/ ./tools/

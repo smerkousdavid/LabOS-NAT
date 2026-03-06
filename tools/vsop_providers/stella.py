@@ -14,16 +14,17 @@ or ``/frame`` (single) HTTP endpoints.
 
 import asyncio
 import base64
+import collections
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
 
 from tools.vsop_providers import StepEvent, StepState, VSOPProvider
-from context.manager import build_all_steps_block
+from context.manager import build_windowed_steps_block
 from frame_source import create_frame_source
 
 # ---------------------------------------------------------------------------
@@ -31,109 +32,30 @@ from frame_source import create_frame_source
 # ---------------------------------------------------------------------------
 
 MONITORING_PROMPT = """\
-You are STELLA, a vision-language model specialized in laboratory protocol analysis.
-You are monitoring a live procedure through AR glasses and determining step transitions for this protocol.
+You are STELLA, a lab protocol monitor. Your ONLY job: detect errors and verify step completion. You do NOT advance the protocol.
 
-<task>
-Analyze the provided video frame(s) and determine the STATUS of the current step.
-Your ONLY job is state-transition detection. Do not provide general commentary.
-</task>
-
-<protocol_context>
-Protocol: {protocol_name}
-Total steps: {total_steps}
-
+Protocol: {protocol_name} ({total_steps} steps)
 {all_steps_block}
-</protocol_context>
 
-<protocol_notes>
-{protocol_context_block}
-</protocol_notes>
-
-<current_step_detail>
 Current step ({current_step_num}/{total_steps}): {current_step_text}
+Description: {step_description}
+Known mistakes: {common_errors_block}
+Context: {protocol_context_block}
 
-<step_description>
-{step_description}
-</step_description>
+{recent_context}
 
-<common_errors>
-Known mistakes for this step:
-{common_errors_block}
-Only report ERROR if you see one of these specific issues, a very obvious mistake, or a clear safety violation.
-DO NOT THROW OUT AN ERROR when the user is: walking off to pick up another reagent, chatting with someone else, writing something down, or texting on the phone.
-</common_errors>
-</current_step_detail>
+Classify as EXACTLY one of:
 
-<transition_criteria>
-You must classify the current state as EXACTLY one of:
+STATUS: SAME -- User is working on current step. No error detected.
+STATUS: STEP_COMPLETE -- Current step outcome is clearly achieved in the final frames. User must still say "next step" to advance.
+STATUS: ERROR -- User made a clear mistake: wrong reagent, skipped sub-step, wrong equipment, safety violation. Do NOT flag errors for: walking away, talking, writing, or phone use.
 
-STATUS: SAME
-  The user is still working on the current step [>>>]. The frames show activity
-  consistent with "{current_step_text}". No transition has occurred.
+{frame_count} frames from last {window_secs}s (oldest first). Final frames = current state.
 
-STATUS: ADVANCED
-  The user has COMPLETED the current step [>>>] and has moved on to the next step.
-  You see clear evidence that "{current_step_text}" is finished AND the user has
-  begun or is preparing for the next step. Do NOT report ADVANCED unless you see
-  concrete visual evidence of completion.
-
-STATUS: ERROR
-  The user is making a MISTAKE on the current step [>>>]. You see something
-  inconsistent with the correct procedure for "{current_step_text}". Examples:
-  wrong reagent, wrong equipment, wrong container, skipped sub-step, incorrect
-  technique, safety violation.
-
-STATUS: COMPLETED
-  ALL steps in the protocol are finished. The final step has been completed and
-  no further action is needed.
-</transition_criteria>
-
-<visual_context>
-These {frame_count} frames are sampled from the last {window_secs} seconds of the
-procedure, ordered chronologically (oldest first). The LATER frames (especially the
-last 2-3) represent the CURRENT state and should carry the most weight in your
-assessment. Earlier frames provide context for how the user got there.
-
-CRITICAL: If the FINAL few frames show the step outcome is achieved (e.g., object is
-in hand, item is placed, reagent is added, equipment is positioned), report ADVANCED
-even if earlier frames show the action still in progress. The most recent frame is
-the ground truth of the current state. Do NOT report SAME just because earlier frames
-show an incomplete action -- always defer to what the latest frames show.
-</visual_context>
-
-<output_format>
-Reply in EXACTLY this format. Three lines, no extra text:
-STATUS: <SAME|ADVANCED|ERROR|COMPLETED>
-DETAIL: <1-sentence observation of what you see in the frames>
-ERROR: <if STATUS is ERROR, describe the specific mistake. Otherwise write: none>
-</output_format>
-
-<examples>
-Example 1 -- Step is "Add 5 mL PBS to wash cells":
-  Frames show: user holding pipette over flask, liquid being dispensed
-  STATUS: SAME
-  DETAIL: User is actively pipetting liquid into the flask, consistent with adding PBS wash.
-  ERROR: none
-
-Example 2 -- Step is "Add 5 mL PBS to wash cells":
-  Frames show: user has set down pipette, picking up next reagent bottle
-  STATUS: ADVANCED
-  DETAIL: PBS wash appears complete, user has moved on to prepare the next reagent.
-  ERROR: none
-
-Example 3 -- Step is "Add 5 mL PBS to wash cells":
-  Frames show: user adding liquid from a red-labeled bottle instead of PBS
-  STATUS: ERROR
-  DETAIL: User appears to be adding liquid from incorrect bottle (red label, not PBS).
-  ERROR: Wrong reagent used. Expected PBS buffer but user is dispensing from a different bottle.
-
-Example 4 -- Final step "Place in thermal cycler":
-  Frames show: tube placed in cycler, lid closed, user stepping back
-  STATUS: COMPLETED
-  DETAIL: Tube is in the thermal cycler with lid closed. Protocol complete.
-  ERROR: none
-</examples>\
+Reply EXACTLY (3 lines, no extra text):
+STATUS: <SAME|STEP_COMPLETE|ERROR>
+DETAIL: <2 sentences max: what you see>
+ERROR: <if ERROR, describe mistake. Otherwise: none>\
 """
 
 GENERATE_PROTOCOL_PROMPT = """\
@@ -217,7 +139,7 @@ Current step: Step {current_num}. {current_step_text}
 STELLA said: "{raw_response}"
 
 Reply with ONLY valid JSON:
-{{"status":"same"|"advanced"|"error"|"completed","detail":"<observation>","error":"<description or null>"}}\
+{{"status":"same"|"step_complete"|"error","detail":"<observation>","error":"<description or null>"}}\
 """
 
 # Fix C: single-frame verification when STELLA returns SAME with progress language
@@ -318,21 +240,21 @@ class StellaVSOPProvider(VSOPProvider):
         self._api_key = stella_cfg.get("api_key", vlm_cfg.get("api_key", "not-needed"))
 
         self._frame_mode = stella_cfg.get("frame_mode", "multi")
-        self._frame_count = multi_cfg.get("count", stella_cfg.get("multi_frame_count", 3))
+        self._frame_count = multi_cfg.get("count", stella_cfg.get("multi_frame_count", 5))
         self._window_secs = multi_cfg.get("window_seconds", stella_cfg.get("multi_frame_window_secs", 10.0))
         self._frame_resolution = multi_cfg.get("resolution", stella_cfg.get("frame_resolution", 384))
         self._jpeg_quality = multi_cfg.get("jpeg_quality", stella_cfg.get("jpeg_quality", 70))
 
-        self._polling_interval = vsop_cfg.get("polling_interval", stella_cfg.get("polling_interval", 3.0))
+        self._polling_interval = vsop_cfg.get("polling_interval", stella_cfg.get("polling_interval", 5.0))
         self._temperature = stella_cfg.get("temperature", 0.7)
         self._max_tokens = stella_cfg.get("max_tokens", 1024)
         self._top_p = stella_cfg.get("top_p", 0.95)
 
         self._llm_fallback_enabled = stella_cfg.get("llm_fallback", True)
-        llm_cfg = config.get("llms", {}).get("router", {})
-        self._llm_base_url = llm_cfg.get("base_url", "http://llm:8001/v1")
-        self._llm_model = llm_cfg.get("model", "Qwen/Qwen2.5-7B-Instruct")
-        self._llm_api_key = llm_cfg.get("api_key", "not-needed")
+        fast_cfg = config.get("llms", {}).get("fast_llm", config.get("llms", {}).get("router", {}))
+        self._llm_base_url = fast_cfg.get("base_url", "http://llm:8001/v1")
+        self._llm_model = fast_cfg.get("model", "Qwen/Qwen3-32B-AWQ")
+        self._llm_api_key = fast_cfg.get("api_key", "not-needed")
         self._protocol_context: str = ""
 
         self._monitor_task: Optional[asyncio.Task] = None
@@ -346,6 +268,20 @@ class StellaVSOPProvider(VSOPProvider):
         self._CLEAR_CONFIRM_POLLS: int = 2
         self._pending_error_count: int = 0
         self._pending_clear_count: int = 0
+
+        # Dedup: prevent repeated TTS/UI pushes
+        self._last_pushed_status: str = ""
+        self._last_pushed_detail: str = ""
+        self._last_push_time: float = 0.0
+        self._STALE_PUSH_INTERVAL: float = 45.0
+        self._step_complete_announced: bool = False
+
+        # Hierarchical observation memory
+        self._granular_observations: collections.deque[Tuple[float, str]] = collections.deque(maxlen=24)
+        self._medium_observations: collections.deque[Tuple[float, str]] = collections.deque(maxlen=5)
+        self._high_observations: List[Tuple[float, str]] = []
+        self._polls_since_medium_summary: int = 0
+        self._medium_since_high_summary: int = 0
 
         self._stella_log = logger.bind(stella=True)
         try:
@@ -384,6 +320,15 @@ class StellaVSOPProvider(VSOPProvider):
         self._last_error_emit_time = 0.0
         self._pending_error_count = 0
         self._pending_clear_count = 0
+        self._last_pushed_status = ""
+        self._last_pushed_detail = ""
+        self._last_push_time = 0.0
+        self._step_complete_announced = False
+        self._granular_observations.clear()
+        self._medium_observations.clear()
+        self._high_observations.clear()
+        self._polls_since_medium_summary = 0
+        self._medium_since_high_summary = 0
 
         if protocol_steps:
             self._steps = list(protocol_steps)
@@ -408,7 +353,7 @@ class StellaVSOPProvider(VSOPProvider):
             total_steps=len(self._steps),
             state=StepState.STARTED,
             step_text=self._steps[0],
-            message=f"Starting protocol '{self._protocol_name}' -- Step 1: {self._steps[0]}",
+            message=f"Step 1: {self._steps[0]}",
         ))
 
         return (
@@ -433,6 +378,15 @@ class StellaVSOPProvider(VSOPProvider):
         self._last_error_emit_time = 0.0
         self._pending_error_count = 0
         self._pending_clear_count = 0
+        self._last_pushed_status = ""
+        self._last_pushed_detail = ""
+        self._last_push_time = 0.0
+        self._step_complete_announced = False
+        self._granular_observations.clear()
+        self._medium_observations.clear()
+        self._high_observations.clear()
+        self._polls_since_medium_summary = 0
+        self._medium_since_high_summary = 0
 
         if self._frame_source is not None:
             await self._frame_source.close()
@@ -461,6 +415,28 @@ class StellaVSOPProvider(VSOPProvider):
         return "All steps completed."
 
     # ------------------------------------------------------------------
+    # Navigation overrides (reset dedup flags on step change)
+    # ------------------------------------------------------------------
+
+    async def manual_advance(self) -> str:
+        self._step_complete_announced = False
+        self._last_pushed_status = ""
+        self._last_pushed_detail = ""
+        return await super().manual_advance()
+
+    async def manual_retreat(self) -> str:
+        self._step_complete_announced = False
+        self._last_pushed_status = ""
+        self._last_pushed_detail = ""
+        return await super().manual_retreat()
+
+    async def manual_goto(self, step_num: int) -> str:
+        self._step_complete_announced = False
+        self._last_pushed_status = ""
+        self._last_pushed_detail = ""
+        return await super().manual_goto(step_num)
+
+    # ------------------------------------------------------------------
     # Ad-hoc questions
     # ------------------------------------------------------------------
 
@@ -468,7 +444,9 @@ class StellaVSOPProvider(VSOPProvider):
         if frames is None:
             frames = await self._capture_frames()
 
-        all_steps = build_all_steps_block(self._steps, self._current_step, self._completed_steps)
+        all_steps = build_windowed_steps_block(
+            self._steps, self._current_step, self._completed_steps, window=3,
+        )
         prompt = ADHOC_QUESTION_PROMPT.format(
             protocol_name=self._protocol_name or "Unknown",
             total_steps=len(self._steps),
@@ -522,6 +500,57 @@ class StellaVSOPProvider(VSOPProvider):
         return None
 
     # ------------------------------------------------------------------
+    # Hierarchical memory summarisation
+    # ------------------------------------------------------------------
+
+    async def _summarize_granular(self) -> str:
+        """Summarise the last ~2 min of granular observations (1-2 sentences)."""
+        entries = [obs for _, obs in self._granular_observations]
+        if not entries:
+            return ""
+        from config import get_reason_llm_client
+        client, model = get_reason_llm_client()
+        step_text = self._steps[self._current_step - 1] if self._steps else "N/A"
+        prompt = (
+            f"Summarize these lab observations from the last 2 minutes into 1-2 sentences.\n"
+            f"Protocol: {self._protocol_name}, Step {self._current_step}: {step_text}\n\n"
+            + "\n".join(f"- {e}" for e in entries)
+        )
+        resp = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=100,
+            )
+        )
+        return resp.choices[0].message.content.strip()
+
+    async def _summarize_medium(self) -> str:
+        """Summarise medium-scale observations into 3-4 bullet points."""
+        entries = [obs for _, obs in self._medium_observations]
+        if not entries:
+            return ""
+        from config import get_reason_llm_client
+        client, model = get_reason_llm_client()
+        step_text = self._steps[self._current_step - 1] if self._steps else "N/A"
+        prompt = (
+            f"Summarize these lab monitoring summaries from the last ~10 minutes "
+            f"into 3-4 concise bullet points.\n"
+            f"Protocol: {self._protocol_name}, Current step {self._current_step}: {step_text}\n\n"
+            + "\n".join(f"- {e}" for e in entries)
+        )
+        resp = await asyncio.to_thread(
+            lambda: client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=200,
+            )
+        )
+        return resp.choices[0].message.content.strip()
+
+    # ------------------------------------------------------------------
     # Monitoring loop
     # ------------------------------------------------------------------
 
@@ -548,19 +577,31 @@ class StellaVSOPProvider(VSOPProvider):
 
         frames = await self._capture_frames()
         if not frames:
+            logger.warning("STELLA monitor: no frames available")
+            try:
+                from tools.protocols.state import get_protocol_state
+                state = get_protocol_state(self.get_bound_session_id())
+                if state.is_active:
+                    state.stella_vision_text = "Camera stream unavailable"
+                    from tools.display import ui as viture_ui
+                    await viture_ui.render_step_panel(state, session_id=self.get_bound_session_id())
+            except Exception:
+                pass
             return
 
         idx = self._current_step - 1
         if idx >= len(self._steps):
             return
 
-        all_steps = build_all_steps_block(self._steps, self._current_step, self._completed_steps)
+        all_steps = build_windowed_steps_block(
+            self._steps, self._current_step, self._completed_steps, window=3,
+        )
 
         step_description = ""
         common_errors_block = "  (none specified)"
         try:
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state()
+            state = get_protocol_state(self.get_bound_session_id())
             if state.is_active and 0 <= idx < len(state.steps):
                 sd = state.steps[idx]
                 if sd.description:
@@ -569,6 +610,20 @@ class StellaVSOPProvider(VSOPProvider):
                     common_errors_block = "\n".join(f"  - {e}" for e in sd.common_errors)
         except Exception:
             pass
+
+        ctx_parts: list[str] = []
+        if self._high_observations:
+            ctx_parts.append(f"Long-term: {self._high_observations[-1][1]}")
+        if self._medium_observations:
+            ctx_parts.append(f"Recent: {self._medium_observations[-1][1]}")
+        if ctx_parts:
+            recent_context = (
+                "<previous_two_minutes_context>\n"
+                + "\n".join(ctx_parts)
+                + "\n</previous_two_minutes_context>"
+            )
+        else:
+            recent_context = ""
 
         prompt = MONITORING_PROMPT.format(
             protocol_name=self._protocol_name,
@@ -581,6 +636,7 @@ class StellaVSOPProvider(VSOPProvider):
             common_errors_block=common_errors_block,
             frame_count=len(frames),
             window_secs=self._window_secs,
+            recent_context=recent_context,
         )
 
         raw = await self._call_stella(prompt, frames)
@@ -599,27 +655,69 @@ class StellaVSOPProvider(VSOPProvider):
         if parsed["status"] == "unknown":
             parsed["status"] = "same"
 
-        # Always verify SAME responses through the text LLM for quick reasoning
-        if parsed["status"] == "same" and not self._in_error_state:
-            parsed = await self._llm_quick_verify(parsed, frames)
-
         detail = parsed.get("detail", "")
         if detail and detail != self._last_observation:
             self._last_observation = detail
 
         try:
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state()
+            state = get_protocol_state(self.get_bound_session_id())
             if state.is_active and detail:
                 old_vision = state.stella_vision_text
                 state.stella_vision_text = detail
-                if detail != old_vision and parsed["status"] in {"same", "advanced"}:
-                    from tools.display import ui as viture_ui
-                    await viture_ui.render_step_panel(state)
+                now = time.monotonic()
+                is_new_ui = (detail != old_vision)
+                is_stale_ui = (now - self._last_push_time) >= self._STALE_PUSH_INTERVAL
+                if is_new_ui or is_stale_ui:
+                    if parsed["status"] in {"same", "advanced"}:
+                        self._last_push_time = now
+                        from tools.display import ui as viture_ui
+                        await viture_ui.render_step_panel(state, session_id=self.get_bound_session_id())
+                    try:
+                        from labos_live_client import get_labos_client
+                        lc = get_labos_client(self.get_bound_session_id())
+                        if lc and lc.connected:
+                            await lc.send_monitoring(detail)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
         await self._handle_parsed(parsed)
+
+        # --- Hierarchical memory bookkeeping ---
+        if detail:
+            self._granular_observations.append((time.monotonic(), detail))
+
+        self._polls_since_medium_summary += 1
+        if self._polls_since_medium_summary >= 24:
+            self._polls_since_medium_summary = 0
+            try:
+                summary = await self._summarize_granular()
+                if summary:
+                    self._medium_observations.append((time.monotonic(), summary))
+                    self._medium_since_high_summary += 1
+            except Exception as exc:
+                logger.warning(f"Granular summary failed: {exc}")
+
+            if self._medium_since_high_summary >= 5:
+                self._medium_since_high_summary = 0
+                try:
+                    high_summary = await self._summarize_medium()
+                    if high_summary:
+                        self._high_observations.append((time.monotonic(), high_summary))
+                except Exception as exc:
+                    logger.warning(f"Medium summary failed: {exc}")
+
+        # Sync memory to protocol state for agent context
+        try:
+            from tools.protocols.state import get_protocol_state
+            pstate = get_protocol_state(self.get_bound_session_id())
+            pstate.monitoring_granular = [obs for _, obs in self._granular_observations]
+            pstate.monitoring_medium = [obs for _, obs in self._medium_observations]
+            pstate.monitoring_high = [obs for _, obs in self._high_observations]
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -628,7 +726,7 @@ class StellaVSOPProvider(VSOPProvider):
     def _parse_response(self, raw: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {"status": "unknown", "detail": raw, "error": None}
 
-        status_match = re.search(r"STATUS:\s*(SAME|ADVANCED|ERROR|COMPLETED)", raw, re.IGNORECASE)
+        status_match = re.search(r"STATUS:\s*(SAME|STEP_COMPLETE|ADVANCED|ERROR|COMPLETED)", raw, re.IGNORECASE)
         if status_match:
             result["status"] = status_match.group(1).lower()
 
@@ -683,6 +781,8 @@ class StellaVSOPProvider(VSOPProvider):
         return {"status": "same", "detail": raw[:200], "error": None}
 
     async def _handle_parsed(self, parsed: Dict[str, Any]):
+        """Report-only handler. NEVER changes protocol step. Only detects
+        errors and reports observations (including step-complete hints)."""
         status = parsed["status"]
         detail = parsed.get("detail", "")
         error_msg = parsed.get("error")
@@ -695,7 +795,7 @@ class StellaVSOPProvider(VSOPProvider):
                 self._pending_clear_count += 1
                 if self._pending_clear_count < self._CLEAR_CONFIRM_POLLS:
                     self._stella_log.info(
-                        f"SAME observed during error state; waiting for clear confirmation "
+                        f"SAME during error; waiting for clear "
                         f"({self._pending_clear_count}/{self._CLEAR_CONFIRM_POLLS})"
                     )
                     return
@@ -704,7 +804,7 @@ class StellaVSOPProvider(VSOPProvider):
                 self._stella_log.info("Auto-cleared error state (STELLA returned SAME)")
                 try:
                     from tools.protocols.state import get_protocol_state
-                    state = get_protocol_state()
+                    state = get_protocol_state(self.get_bound_session_id())
                     state.error_cooldown_until = time.time() + self._POST_CLEAR_GRACE
                 except Exception:
                     pass
@@ -719,39 +819,43 @@ class StellaVSOPProvider(VSOPProvider):
                 self._pending_error_count = 0
             return
 
-        if status == "advanced":
+        if status in ("step_complete", "advanced"):
             self._in_error_state = False
             self._pending_error_count = 0
             self._pending_clear_count = 0
-            self._completed_steps.append(self._current_step)
-            await self._emit(StepEvent(
-                step_num=self._current_step,
-                total_steps=len(self._steps),
-                state=StepState.COMPLETED,
-                step_text=step_text,
-                message=f"Completed step {self._current_step}: {step_text}",
-            ))
-            self._current_step += 1
-            if self._current_step <= len(self._steps):
-                new_text = self._steps[self._current_step - 1]
-                await self._emit(StepEvent(
-                    step_num=self._current_step,
-                    total_steps=len(self._steps),
-                    state=StepState.STARTED,
-                    step_text=new_text,
-                    message=f"Starting step {self._current_step}: {new_text}",
-                ))
-            else:
-                await self._emit(StepEvent(
-                    step_num=len(self._steps),
-                    total_steps=len(self._steps),
-                    state=StepState.COMPLETED,
-                    step_text=step_text,
-                    message="All steps completed! Protocol finished.",
-                ))
-                self._active = False
+            self._stella_log.info(
+                f"STEP_COMPLETE detected on step {self._current_step}: {detail}"
+            )
 
-        elif status == "error":
+            now = time.monotonic()
+            is_new = (status != self._last_pushed_status or detail != self._last_pushed_detail)
+            is_stale = (now - self._last_push_time) >= self._STALE_PUSH_INTERVAL
+
+            if is_new or is_stale:
+                self._last_pushed_status = status
+                self._last_pushed_detail = detail
+                self._last_push_time = now
+                try:
+                    from tools.protocols.state import get_protocol_state
+                    state = get_protocol_state(self.get_bound_session_id())
+                    if state.is_active:
+                        state.stella_vision_text = (
+                            f"Step appears complete. Say 'next step' to continue."
+                        )
+                        from tools.display import ui as viture_ui
+                        await viture_ui.render_step_panel(state, session_id=self.get_bound_session_id())
+                        if not self._step_complete_announced:
+                            from tools.display.tts import push_tts
+                            await push_tts(
+                                f"Step {self._current_step} looks done. Say next step to continue.",
+                                session_id=self.get_bound_session_id(),
+                            )
+                            self._step_complete_announced = True
+                except Exception as exc:
+                    logger.warning(f"Step-complete notification failed: {exc}")
+            return
+
+        if status == "error":
             if not self._in_error_state:
                 self._pending_error_count += 1
                 if self._pending_error_count < self._ERROR_CONFIRM_POLLS:
@@ -771,7 +875,7 @@ class StellaVSOPProvider(VSOPProvider):
 
             try:
                 from tools.protocols.state import get_protocol_state
-                state = get_protocol_state()
+                state = get_protocol_state(self.get_bound_session_id())
                 if state.is_error_on_cooldown():
                     self._stella_log.info(
                         f"ERROR suppressed (grace period) step={self._current_step}: {error_msg or detail}"
@@ -795,20 +899,8 @@ class StellaVSOPProvider(VSOPProvider):
             ))
 
         elif status == "completed":
-            self._in_error_state = False
-            self._pending_error_count = 0
-            self._pending_clear_count = 0
-            for s in range(self._current_step, len(self._steps) + 1):
-                if s not in self._completed_steps:
-                    self._completed_steps.append(s)
-            await self._emit(StepEvent(
-                step_num=len(self._steps),
-                total_steps=len(self._steps),
-                state=StepState.COMPLETED,
-                step_text=self._steps[-1] if self._steps else "",
-                message="All steps completed! Protocol finished.",
-            ))
-            self._active = False
+            self._stella_log.info("STELLA reports full protocol completion (observation only)")
+            return
 
     # ------------------------------------------------------------------
     # Verification helpers (Fix C + Fix D)
@@ -991,8 +1083,7 @@ class StellaVSOPProvider(VSOPProvider):
 
     def _ensure_frame_source(self):
         if self._frame_source is None:
-            from config import _current_session_id
-            session_id = _current_session_id.get("default-xr-session")
+            session_id = self.get_bound_session_id()
             self._frame_source = create_frame_source(self._config, session_id)
 
     async def _capture_frames(self) -> List[str]:

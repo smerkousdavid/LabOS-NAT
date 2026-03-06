@@ -26,6 +26,7 @@ from tools.protocols.tools import (
     get_protocol_status,
     query_completed_protocol_data,
     show_experiment_data,
+    log_observation,
     get_errors,
     detailed_step,
 )
@@ -36,10 +37,27 @@ from tools.common.web import web_search, image_search
 from tools.common.code import run_code
 from tools.common.datetime import get_datetime
 from tools.common.history_summary import summarize_history
+from tools.robot.tools import (
+    robot_get_status,
+    robot_list_objects,
+    robot_start_protocol,
+    robot_stop,
+    robot_gripper,
+    robot_go_home,
+)
 
 from tools.protocols.state import get_protocol_state
 from context.manager import get_context_manager
-from config import get_all_tool_enabled
+from config import get_all_tool_enabled, get_gemini_mode
+
+
+def _get_vlm_tool():
+    """Return query_gemini when in vision_only mode, query_stella otherwise."""
+    if get_gemini_mode() == "vision_only":
+        from tools.experts.gemini_vlm import query_gemini
+        return query_gemini
+    return query_stella
+
 
 ALL_TOOLS = [
     list_protocols,
@@ -54,6 +72,7 @@ ALL_TOOLS = [
     get_protocol_status,
     query_completed_protocol_data,
     show_experiment_data,
+    log_observation,
     get_errors,
     detailed_step,
     web_search,
@@ -64,12 +83,18 @@ ALL_TOOLS = [
     update_user,
     send_to_display,
     show_protocol_panel,
+    robot_get_status,
+    robot_list_objects,
+    robot_start_protocol,
+    robot_stop,
+    robot_gripper,
+    robot_go_home,
 ]
 
 TOOL_NOTIFICATIONS: Dict[str, str] = {
     "query_stella": "Asking Stella for more info",
+    "query_gemini": "Checking camera feed",
     "run_code": "Running some code",
-    "start_protocol": "Starting the protocol",
     "web_search": "Searching the web",
     "image_search": "Searching for images",
     "detailed_step": "Getting step details",
@@ -86,6 +111,7 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "restart_protocol": "Restart the active protocol from step one.",
     "clear_error": "Clear current protocol error state and continue.",
     "query_stella": "Ask STELLA vision model about current scene.",
+    "query_gemini": "Ask Gemini about camera feed (continuous video context).",
     "get_protocol_status": "Get current protocol status summary.",
     "query_completed_protocol_data": "Query captured data from completed protocol runs in this session.",
     "show_experiment_data": "Show details from a captured experiment-data section.",
@@ -99,6 +125,12 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "update_user": "Send spoken progress update via TTS.",
     "send_to_display": "Render custom content on XR display.",
     "show_protocol_panel": "Return XR display to protocol panel.",
+    "robot_get_status": "Get the current robot arm status.",
+    "robot_list_objects": "List objects visible in the robot camera.",
+    "robot_start_protocol": "Start a protocol on the robot arm.",
+    "robot_stop": "Emergency-stop the robot arm.",
+    "robot_gripper": "Control the robot gripper position.",
+    "robot_go_home": "Send the robot arm to home position.",
 }
 
 
@@ -162,15 +194,33 @@ def _dynamic_instructions(ctx, agent) -> str:
 
 
 def create_agent(config: Dict[str, Any]) -> Agent:
-    """Create the main LabOS Agent from the NAT config."""
-    llm_cfg = config.get("llms", {}).get("router", {})
-    base_url = llm_cfg.get("base_url", "http://localhost:8001/v1")
-    model_name = llm_cfg.get("model", "Qwen/Qwen3-32B-AWQ")
-    api_key = llm_cfg.get("api_key", "not-needed")
+    """Create the main LabOS Agent from the NAT config.
+
+    Uses reason_llm (Gemini via OpenAI-compat endpoint) when available,
+    falls back to the legacy router (Qwen) config.
+    """
+    reason_cfg = config.get("llms", {}).get("reason_llm", {})
+    if reason_cfg.get("base_url"):
+        base_url = reason_cfg["base_url"]
+        model_name = reason_cfg.get("model", "gemini-2.5-flash")
+        api_key = reason_cfg.get("api_key", "not-needed")
+    else:
+        llm_cfg = config.get("llms", {}).get("router", {})
+        base_url = llm_cfg.get("base_url", "http://localhost:8001/v1")
+        model_name = llm_cfg.get("model", "Qwen/Qwen3-32B-AWQ")
+        api_key = llm_cfg.get("api_key", "not-needed")
+
+    from config import _resolve_env_vars
+    api_key = _resolve_env_vars(api_key)
 
     client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
     set_tracing_disabled(True)
+
+    tools = list(ALL_TOOLS)
+    vlm_tool = _get_vlm_tool()
+    if vlm_tool is not query_stella:
+        tools = [vlm_tool if t is query_stella else t for t in tools]
 
     return Agent(
         name="LabOS Assistant",
@@ -179,10 +229,9 @@ def create_agent(config: Dict[str, Any]) -> Agent:
             model=model_name,
             openai_client=client,
         ),
-        tools=ALL_TOOLS,
+        tools=tools,
         model_settings=ModelSettings(
             temperature=0.7,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         ),
     )
 

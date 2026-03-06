@@ -49,6 +49,11 @@ class ProtocolPush(TypedDict):
     protocols: List[Dict[str, str]]  # [{"name": "...", "content": "..."}]
 
 
+class FastCommand(TypedDict):
+    type: Literal["fast_command"]
+    command: str  # "next_step" | "previous_step"
+
+
 class Ping(TypedDict):
     type: Literal["ping"]
 
@@ -102,14 +107,42 @@ class ToolCall(TypedDict):
     status: str  # "started" | "completed" | "failed"
 
 
+# ---- Robot Runtime -> NAT Server ---------------------------------------------
+
+class RobotRegister(TypedDict):
+    type: Literal["robot_register"]
+    session_id: str
+    tools: List[Dict[str, Any]]
+
+
+class RobotResult(TypedDict):
+    type: Literal["robot_result"]
+    request_id: str
+    tool_name: str
+    success: bool
+    result: Any
+
+
+# ---- NAT Server -> Robot Runtime ---------------------------------------------
+
+class RobotExecute(TypedDict):
+    type: Literal["robot_execute"]
+    request_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+
+
 # ---- Type unions for dispatch ------------------------------------------------
 
-InboundMessage = UserMessage | FrameResponse | AudioStream | VideoStream | StreamInfo | ProtocolPush | Ping
+InboundMessage = UserMessage | FrameResponse | AudioStream | VideoStream | StreamInfo | ProtocolPush | FastCommand | Ping
 OutboundMessage = AgentResponse | Notification | DisplayUpdate | RequestFrames | TtsOnly | WakeTimeout | Pong | ToolCall
 
 # All valid type strings
-INBOUND_TYPES = {"user_message", "frame_response", "audio_stream", "video_stream", "stream_info", "protocol_push", "ping"}
+INBOUND_TYPES = {"user_message", "frame_response", "audio_stream", "video_stream", "stream_info", "protocol_push", "fast_command", "ping"}
 OUTBOUND_TYPES = {"agent_response", "notification", "display_update", "request_frames", "tts_only", "wake_timeout", "pong", "tool_call"}
+
+ROBOT_INBOUND_TYPES = {"robot_register", "robot_result"}
+ROBOT_OUTBOUND_TYPES = {"robot_execute"}
 
 
 # ---- Helpers -----------------------------------------------------------------
@@ -164,3 +197,7 @@ def make_protocol_push(protocols: List[Dict[str, str]]) -> ProtocolPush:
 
 def make_video_stream(data: str, width: int, height: int, seq: int) -> VideoStream:
     return {"type": "video_stream", "data": data, "width": width, "height": height, "seq": seq}
+
+
+def make_robot_execute(request_id: str, tool_name: str, arguments: Dict[str, Any]) -> RobotExecute:
+    return {"type": "robot_execute", "request_id": request_id, "tool_name": tool_name, "arguments": arguments}

@@ -11,10 +11,10 @@ from tools.common.toggle import toggle_dashboard
 from config import _current_session_id
 
 
-async def push_tts(message: str):
+async def push_tts(message: str, session_id: str | None = None):
     """Send a TTS message through the WebSocket to the XR runtime."""
     from ws_handler import send_to_session
-    sid = _current_session_id.get("default-xr-session")
+    sid = session_id or _current_session_id.get("default-xr-session")
     await send_to_session(sid, {
         "type": "tts_only",
         "text": message,

@@ -233,10 +233,16 @@ if server_config.get("cors_enabled", True):
     )
 
 
-# WebSocket endpoint
+# WebSocket endpoints
 @app.websocket("/ws")
 async def ws_route(websocket: WebSocket):
     await websocket_endpoint(websocket)
+
+
+@app.websocket("/ws/robot")
+async def ws_robot_route(websocket: WebSocket):
+    from tools.robot.ws_handler import robot_websocket_endpoint
+    await robot_websocket_endpoint(websocket)
 
 
 # HTTP endpoints (admin / dashboard)

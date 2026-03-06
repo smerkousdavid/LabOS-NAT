@@ -29,6 +29,16 @@ def load_secrets(path: Path) -> dict:
     return secrets
 
 
+def _resolve_secret(value: str, secrets: dict) -> str:
+    """Replace ${VAR} in a config value with the matching secret."""
+    import re
+    if not isinstance(value, str):
+        return value
+    def _sub(m):
+        return secrets.get(m.group(1), m.group(0))
+    return re.sub(r"\$\{(\w+)\}", _sub, value)
+
+
 def generate_nat_config(cfg: dict, secrets: dict) -> dict:
     lm = cfg.get("models", {})
     nat = cfg.get("nat", {})
@@ -36,6 +46,11 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
     vsop = nat.get("vsop", {})
     tools = nat.get("tools", {})
     video = nat.get("video", {})
+    gemini_cm = nat.get("gemini_custom_manage", {})
+    labos_live = nat.get("labos_live", {})
+
+    fast_llm = lm.get("fast_llm", lm.get("llm", {}))
+    reason_llm = lm.get("reason_llm", lm.get("llm", {}))
 
     return {
         "session": {
@@ -52,6 +67,16 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
                 "api_key": lm.get("llm", {}).get("api_key", "not-needed"),
                 "max_model_len": lm.get("llm", {}).get("max_model_len", 8096),
             },
+            "fast_llm": {
+                "base_url": fast_llm.get("base_url", "http://llm:8001/v1"),
+                "model": fast_llm.get("model", "Qwen/Qwen3-32B-AWQ"),
+                "api_key": _resolve_secret(fast_llm.get("api_key", "not-needed"), secrets),
+            },
+            "reason_llm": {
+                "base_url": reason_llm.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+                "model": reason_llm.get("model", "gemini-2.5-flash"),
+                "api_key": _resolve_secret(reason_llm.get("api_key", "not-needed"), secrets),
+            },
             "vlm": {
                 "base_url": lm.get("vlm", {}).get("base_url", "http://localhost:8500/v1"),
                 "model": lm.get("vlm", {}).get("model", "Zaixi/STELLA-VLM-32b"),
@@ -61,9 +86,9 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
         },
         "vsop_provider": {
             "provider": vsop.get("provider", "stella"),
-            "polling_interval": vsop.get("polling_interval", 3),
+            "polling_interval": vsop.get("polling_interval", 5),
             "multi_frame": vsop.get("multi_frame", {
-                "count": 8,
+                "count": 5,
                 "window_seconds": 10,
                 "resolution": 512,
                 "jpeg_quality": 70,
@@ -73,9 +98,25 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
             "mode": video.get("mode", "websocket"),
             "mediamtx_url": video.get("mediamtx_url", "rtsp://mediamtx:8554"),
         },
+        "gemini_custom_manage": {
+            "enabled": gemini_cm.get("enabled", True),
+            "mode": gemini_cm.get("mode", "full"),
+            "model": gemini_cm.get("model", "gemini-3.1-flash-lite-preview"),
+            "api_key": _resolve_secret(gemini_cm.get("api_key", "${GOOGLE_API_KEY}"), secrets),
+            "monitoring_frames": gemini_cm.get("monitoring_frames", 20),
+            "monitoring_window_seconds": gemini_cm.get("monitoring_window_seconds", 20),
+            "monitoring_interval": gemini_cm.get("monitoring_interval", 10),
+            "chat_frames": gemini_cm.get("chat_frames", 5),
+        },
+        "labos_live": {
+            "enabled": labos_live.get("enabled", False),
+            "initial_qr_code": labos_live.get("initial_qr_code", False),
+            "website_base_url": labos_live.get("website_base_url", ""),
+        },
         "tools": tools,
         "secrets": {
             "serpapi_key": secrets.get("SERPAPI_KEY", ""),
+            "google_api_key": secrets.get("GOOGLE_API_KEY", ""),
         },
         "server": {
             "host": nat.get("host", "0.0.0.0"),

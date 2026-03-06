@@ -26,3 +26,9 @@ ddgs>=9.0.0
 
 # === Video / Frame Capture ===
 opencv-python-headless>=4.9.0
+
+# === LabOS Live WebSocket Client ===
+websockets>=12.0
+
+# === Gemini Live API (optional -- only needed when gemini_live.enabled) ===
+google-genai>=1.0.0

@@ -20,6 +20,7 @@ class StepDetail:
     common_errors: List[str] = field(default_factory=list)
     status: str = "pending"  # pending | in_progress | completed | error
     error_detail: Optional[str] = None
+    robot_protocol: Optional[str] = None  # when set, auto-triggers this robot protocol on step entry
 
 
 @dataclass
@@ -44,6 +45,11 @@ class ProtocolState:
     error_display_until: float = 0.0
     error_cooldown_until: float = 0.0
 
+    # STELLA-VLM hierarchical observation memory (synced from stella.py)
+    monitoring_granular: List[str] = field(default_factory=list)
+    monitoring_medium: List[str] = field(default_factory=list)
+    monitoring_high: List[str] = field(default_factory=list)
+
     def reset(self, clear_completed_runs: bool = False):
         self.is_active = False
         self.mode = "idle"
@@ -59,6 +65,9 @@ class ProtocolState:
         self.data_capture_hashes = []
         self.error_display_until = 0.0
         self.error_cooldown_until = 0.0
+        self.monitoring_granular = []
+        self.monitoring_medium = []
+        self.monitoring_high = []
         if clear_completed_runs:
             self.completed_runs = []
 

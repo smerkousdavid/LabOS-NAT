@@ -11,6 +11,7 @@ wake word filter whenever the context changes.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,6 +21,7 @@ CONTEXT_TIMEOUTS: Dict[str, float] = {
     "main_menu": 60.0,
     "protocol_listing": 120.0,
     "protocol_running": 1200.0,
+    "protocol_completed": 120.0,
 }
 
 
@@ -47,6 +49,33 @@ def build_all_steps_block(
     return "\n".join(lines)
 
 
+def build_windowed_steps_block(
+    steps: List[str],
+    current_step: int,
+    completed_steps: List[int],
+    window: int = 3,
+) -> str:
+    """Build a windowed step list (±window around current) for token-limited models."""
+    total = len(steps)
+    lo = max(1, current_step - window)
+    hi = min(total, current_step + window)
+
+    lines: List[str] = []
+    if lo > 1:
+        lines.append(f"  ... {lo - 1} earlier step(s) ...")
+    for i in range(lo, hi + 1):
+        step_text = steps[i - 1]
+        if i in completed_steps:
+            lines.append(f"  [DONE] Step {i}: {step_text}")
+        elif i == current_step:
+            lines.append(f"  [>>>]  Step {i}: {step_text}          <-- CURRENT")
+        else:
+            lines.append(f"  [ ]    Step {i}: {step_text}")
+    if hi < total:
+        lines.append(f"  ... {total - hi} more step(s) ...")
+    return "\n".join(lines)
+
+
 def _load_mode_template(name: str) -> str:
     """Read a prompt ``.md`` file from ``context/modes/``."""
     path = _MODES_DIR / f"{name}.md"
@@ -71,6 +100,7 @@ def _build_running_prompt(
     current_step_common_errors: str = "",
     protocol_extra_context: str = "",
     experiment_data_block: str = "",
+    stella_observation_history: str = "",
 ) -> str:
     template = _load_mode_template("protocol_running")
 
@@ -113,6 +143,7 @@ def _build_running_prompt(
         .replace("{current_step_common_errors}", current_step_common_errors)
         .replace("{protocol_extra_context}", protocol_extra_context)
         .replace("{experiment_data_block}", experiment_data_block)
+        .replace("{stella_observation_history}", stella_observation_history or "(no observations yet)")
         .replace("{next_step_num}", str(next_step_num))
         .replace("{next_step_text}", next_step_text)
         .replace("{completed_count}", str(completed_count))
@@ -131,7 +162,7 @@ class ContextManager:
         self._context: str = "main_menu"
 
     def set_context(self, ctx: str):
-        if ctx not in ("main_menu", "protocol_listing", "protocol_running"):
+        if ctx not in ("main_menu", "protocol_listing", "protocol_running", "protocol_completed"):
             logger.warning(f"ContextManager: unknown context '{ctx}', ignoring")
             return
         logger.info(f"ContextManager: {self._context} -> {ctx}")
@@ -181,6 +212,43 @@ class ContextManager:
             )
             return _build_listing_prompt(listing_text)
 
+        if self._context == "protocol_completed" and state is not None:
+            duration_s = int(time.time() - state.start_time) if state.start_time else 0
+            m, s = divmod(duration_s, 60)
+            duration = f"{m}m {s}s"
+
+            obs_lines: list[str] = []
+            if state.monitoring_high:
+                obs_lines.append("Long-term observations:")
+                for h in state.monitoring_high:
+                    obs_lines.append(f"  {h}")
+            if state.monitoring_medium:
+                obs_lines.append("Medium-term observations:")
+                for med in state.monitoring_medium:
+                    obs_lines.append(f"  - {med}")
+            obs_text = "\n".join(obs_lines) if obs_lines else "(none)"
+
+            error_lines = [
+                f"  Step {e.get('step', '?')}: {e.get('detail', 'unknown')}"
+                for e in (state.error_history or [])
+            ]
+            error_text = "\n".join(error_lines) if error_lines else "(none)"
+
+            exp_data = state.experiment_data_xml() if hasattr(state, "experiment_data_xml") else "(none)"
+
+            return (
+                f"You are STELLA, protocol coordinator on AR glasses.\n"
+                f"The protocol '{state.protocol_name}' is COMPLETE.\n"
+                f"Duration: {duration}. Steps: {len(state.completed_steps)}/{len(state.steps)}. "
+                f"Errors: {len(state.error_history)}.\n\n"
+                f"The user can ask about this completed run for the next minute.\n"
+                f"Answer questions about observations, errors, logged data, or steps.\n"
+                f"Keep answers concise (1-3 sentences). No flowery language.\n\n"
+                f"<observations>\n{obs_text}\n</observations>\n\n"
+                f"<errors>\n{error_text}\n</errors>\n\n"
+                f"<experiment_data>\n{exp_data}\n</experiment_data>"
+            )
+
         if self._context == "protocol_running" and state is not None:
             step_desc = ""
             step_errors = ""
@@ -189,6 +257,22 @@ class ContextManager:
                 step_desc = detail.description
                 if detail.common_errors:
                     step_errors = "\n".join(f"  - {e}" for e in detail.common_errors)
+
+            obs_lines: list[str] = []
+            if state.monitoring_high:
+                obs_lines.append("Long-term (30min summaries):")
+                for h in state.monitoring_high:
+                    obs_lines.append(f"  {h}")
+            if state.monitoring_medium:
+                obs_lines.append("Medium-term (2min summaries):")
+                for m in state.monitoring_medium:
+                    obs_lines.append(f"  - {m}")
+            if state.monitoring_granular:
+                recent = state.monitoring_granular[-6:]
+                obs_lines.append("Recent (~30s):")
+                for g in recent:
+                    obs_lines.append(f"  - {g}")
+            stella_obs_history = "\n".join(obs_lines) if obs_lines else ""
 
             return _build_running_prompt(
                 protocol_name=state.protocol_name,
@@ -201,6 +285,7 @@ class ContextManager:
                 current_step_common_errors=step_errors,
                 protocol_extra_context=state.extra_context,
                 experiment_data_block=state.experiment_data_xml(),
+                stella_observation_history=stella_obs_history,
             )
 
         return _load_mode_template("main_menu")

@@ -70,6 +70,85 @@ def get_llm_client(llm_name: str = "router") -> Tuple:
     return OpenAI(base_url=base_url, api_key=api_key), model
 
 
+def _resolve_env_vars(value: str) -> str:
+    """Replace ${VAR} placeholders with environment variable values."""
+    import os, re
+    def _replace(m):
+        return os.environ.get(m.group(1), m.group(0))
+    return re.sub(r"\$\{(\w+)\}", _replace, value) if isinstance(value, str) else value
+
+
+def get_fast_llm_client() -> Tuple:
+    """Return ``(OpenAI_client, model_name)`` for the fast/local LLM (Qwen).
+
+    Used for: STELLA monitoring loop, quick verify, LLM fallback parsing.
+    """
+    from openai import OpenAI
+    cfg = _config.get("llms", {}).get("fast_llm", _config.get("llms", {}).get("router", {}))
+    base_url = cfg.get("base_url", "http://llm:8001/v1")
+    api_key = _resolve_env_vars(cfg.get("api_key", "not-needed"))
+    model = cfg.get("model", "Qwen/Qwen3-32B-AWQ")
+    return OpenAI(base_url=base_url, api_key=api_key), model
+
+
+def get_reason_llm_client() -> Tuple:
+    """Return ``(OpenAI_client, model_name)`` for the reasoning LLM (Gemini).
+
+    Used for: main agent, protocol enrichment, compaction, question answering.
+    Uses Gemini's OpenAI-compatible endpoint.
+    """
+    from openai import OpenAI
+    cfg = _config.get("llms", {}).get("reason_llm", _config.get("llms", {}).get("router", {}))
+    base_url = cfg.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    api_key = _resolve_env_vars(cfg.get("api_key", "not-needed"))
+    model = cfg.get("model", "gemini-2.5-flash")
+    return OpenAI(base_url=base_url, api_key=api_key), model
+
+
+# ---------------------------------------------------------------------------
+# LabOS Live Session helpers
+# ---------------------------------------------------------------------------
+
+def get_labos_live_config() -> Dict[str, Any]:
+    """Return the labos_live config block, or empty dict if absent."""
+    return _config.get("labos_live", {})
+
+
+def is_labos_live_enabled() -> bool:
+    return bool(get_labos_live_config().get("enabled", False))
+
+
+def is_initial_qr_code() -> bool:
+    return bool(get_labos_live_config().get("initial_qr_code", False))
+
+
+# ---------------------------------------------------------------------------
+# Gemini custom-manage helpers
+# ---------------------------------------------------------------------------
+
+def get_gemini_config() -> Dict[str, Any]:
+    """Return the gemini_custom_manage config block, or empty dict if absent."""
+    return _config.get("gemini_custom_manage", {})
+
+
+def is_gemini_enabled() -> bool:
+    return bool(get_gemini_config().get("enabled", False))
+
+
+def get_gemini_mode() -> str:
+    """Return 'full', 'vision_only', or 'disabled'."""
+    cfg = get_gemini_config()
+    if not cfg.get("enabled", False):
+        return "disabled"
+    return cfg.get("mode", "full")
+
+
+# Backward-compat aliases (referenced by older code paths)
+get_gemini_live_config = get_gemini_config
+is_gemini_live_enabled = is_gemini_enabled
+get_gemini_live_mode = get_gemini_mode
+
+
 # ---------------------------------------------------------------------------
 # Tool toggles
 # ---------------------------------------------------------------------------
@@ -111,6 +190,18 @@ def _initialize_tool_overrides(config: Dict[str, Any]):
         "get_protocol_status",
     ):
         seed(name, vsop_enabled)
+
+    # Robot tools are disabled by default; the RobotConnectionManager
+    # enables them dynamically when a robot connects.
+    for name in (
+        "robot_get_status",
+        "robot_list_objects",
+        "robot_start_protocol",
+        "robot_stop",
+        "robot_gripper",
+        "robot_go_home",
+    ):
+        seed(name, False)
 
 
 def get_tool_enabled(tool_name: str, default: bool = True) -> bool:

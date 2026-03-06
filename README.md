@@ -85,3 +85,60 @@ Protocol management, STELLA VLM monitoring, web search, code execution, datetime
 |---|---|---|
 | `SERPAPI_KEY` | Web search tool | Optional (falls back to DuckDuckGo) |
 | `DASHSCOPE_API_KEY` | Qwen TTS | Only if using Qwen provider |
+| `GOOGLE_API_KEY` | Gemini Live API (when `gemini_live.enabled`) | Optional |
+
+## LabOS Live Session Integration
+
+Optional WebSocket bridge that streams protocol events, chat, and VLM monitoring data to a LabOS web frontend for real-time display and recording. Enabled when an XR device scans a QR code from the LabOS web UI.
+
+### Config
+
+```yaml
+# In config.yaml under nat:
+labos_live:
+  enabled: false          # master switch
+  initial_qr_code: false  # show QR scanning prompt on XR startup
+```
+
+### How It Works
+
+1. The LabOS web frontend shows a QR code containing a session payload (`session_id`, `ws_endpoint`, `token`, `publish_rtsp`)
+2. XR glasses scan the QR code; the runtime sends the payload to NAT
+3. NAT opens a second WebSocket to the LabOS server at `ws_endpoint`
+4. All protocol events are fan-out to both the XR glasses (existing path) and the LabOS server (new path)
+5. The LabOS server records everything and pushes to the web frontend in real-time
+
+### Events Sent to LabOS (NAT -> LabOS)
+
+| Type | When | Fields |
+|------|------|--------|
+| `chat` | User speaks or agent replies | `source` (user/assistant), `message` |
+| `monitoring` | VLM observation update (~5s) | `message` |
+| `protocol_start` | `start_protocol` called | `name`, `steps` [{step, short, long}] |
+| `protocol_change_step` | Step navigation | `name`, `previous_step`, `step` |
+| `protocol_error` | Error detected | `name`, `error` |
+| `protocol_data` | Data logged | `name`, `data` |
+| `protocol_stop` | Protocol ended | -- |
+| `stream_started` | RTSP relay active | -- |
+| `end_stream` | Session ending | -- |
+
+### Events Received from LabOS (LabOS -> NAT)
+
+| Type | Purpose |
+|------|---------|
+| `start_protocol_by_text` | Web user pushes a protocol to the AR device |
+| `pong` | Keepalive response |
+| `error` | Malformed message notification |
+
+### QR Code Payload Format
+
+```json
+{
+  "type": "labos_live",
+  "api_base": "https://labos.example.com",
+  "session_id": "uuid-xxx",
+  "token": "abc123",
+  "ws_endpoint": "wss://labos.example.com/ws/vlm/uuid-xxx",
+  "publish_rtsp": "rtsp://mediamtx-host:8554/live/uuid-xxx"
+}
+```

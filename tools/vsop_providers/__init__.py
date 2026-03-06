@@ -5,8 +5,8 @@ providers, shared data types, a factory for instantiation, and the global
 singleton accessor.
 
 Supported providers:
-  - stella  (StellaVSOPProvider)  -- STELLA-VLM based protocol monitoring
-  - ramblr  (RamblrVSOPProvider)  -- Ramblr Process Understanding service
+  - stella               (StellaVSOPProvider)  -- STELLA-VLM based protocol monitoring
+  - gemini_custom_manage (GeminiVLMProvider)   -- Gemini polling-based (generate_content + chat)
 """
 
 from abc import ABC, abstractmethod
@@ -64,6 +64,7 @@ class VSOPProvider(ABC):
         self._steps: List[str] = []
         self._current_step: int = 0
         self._completed_steps: List[int] = []
+        self._session_id: Optional[str] = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -98,8 +99,8 @@ class VSOPProvider(ABC):
     async def manual_advance(self) -> str:
         if not self._active:
             return "No active protocol."
-        if self._current_step >= len(self._steps):
-            return "Already on the last step."
+        if self._current_step > len(self._steps):
+            return "Already completed all steps."
         self._completed_steps.append(self._current_step)
         old_text = self._steps[self._current_step - 1]
         await self._emit(StepEvent(
@@ -107,7 +108,7 @@ class VSOPProvider(ABC):
             total_steps=len(self._steps),
             state=StepState.COMPLETED,
             step_text=old_text,
-            message=f"Completed step {self._current_step}: {old_text}",
+            message=f"Completed step {self._current_step}",
         ))
         self._current_step += 1
         if self._current_step <= len(self._steps):
@@ -117,9 +118,9 @@ class VSOPProvider(ABC):
                 total_steps=len(self._steps),
                 state=StepState.STARTED,
                 step_text=new_text,
-                message=f"Starting step {self._current_step}: {new_text}",
+                message=f"Step {self._current_step}: {new_text}",
             ))
-            return f"Advanced to step {self._current_step}: {new_text}"
+            return f"Step {self._current_step}: {new_text}"
         else:
             await self._emit(StepEvent(
                 step_num=len(self._steps),
@@ -145,9 +146,9 @@ class VSOPProvider(ABC):
             total_steps=len(self._steps),
             state=StepState.STARTED,
             step_text=step_text,
-            message=f"Going back to step {self._current_step}: {step_text}",
+            message=f"Step {self._current_step}: {step_text}",
         ))
-        return f"Went back to step {self._current_step}: {step_text}"
+        return f"Step {self._current_step}: {step_text}"
 
     async def manual_goto(self, step_num: int) -> str:
         if not self._active:
@@ -162,7 +163,7 @@ class VSOPProvider(ABC):
             total_steps=len(self._steps),
             state=StepState.STARTED,
             step_text=step_text,
-            message=f"Jumping to step {step_num}: {step_text}",
+            message=f"Step {step_num}: {step_text}",
         ))
         return f"Jumped to step {step_num}: {step_text}"
 
@@ -204,6 +205,17 @@ class VSOPProvider(ABC):
     def protocol_name(self) -> Optional[str]:
         return self._protocol_name
 
+    def bind_session(self, session_id: str) -> None:
+        """Bind this provider instance to a concrete NAT websocket session."""
+        self._session_id = session_id
+
+    def get_bound_session_id(self) -> str:
+        """Return the bound session id, falling back to current context var."""
+        if self._session_id:
+            return self._session_id
+        from config import _current_session_id
+        return _current_session_id.get("default-xr-session")
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -214,6 +226,11 @@ class VSOPProviderFactory:
 
     @staticmethod
     def create(config: Dict[str, Any]) -> VSOPProvider:
+        gemini_cfg = config.get("gemini_custom_manage", {})
+        if gemini_cfg.get("enabled", False):
+            from tools.vsop_providers.gemini_vlm import GeminiVLMProvider
+            return GeminiVLMProvider(config)
+
         vsop_cfg = config.get("vsop_provider", {})
         provider_name = vsop_cfg.get("provider", "stella")
 
@@ -221,7 +238,7 @@ class VSOPProviderFactory:
             from tools.vsop_providers.stella import StellaVSOPProvider
             return StellaVSOPProvider(config)
         else:
-            raise ValueError(f"Unknown VSOP provider: {provider_name}. Only 'stella' is supported.")
+            raise ValueError(f"Unknown VSOP provider: {provider_name}. Supported: 'stella', 'gemini_custom_manage'.")
 
 
 # ---------------------------------------------------------------------------
@@ -258,5 +275,7 @@ def init_vsop_provider(config: Dict[str, Any]) -> VSOPProvider:
 def init_vsop_provider_for_session(session_id: str, config: Dict[str, Any]) -> VSOPProvider:
     """Create, store, and return a VSOP provider for a specific session."""
     if session_id not in _vsop_providers:
-        _vsop_providers[session_id] = VSOPProviderFactory.create(config)
+        provider = VSOPProviderFactory.create(config)
+        provider.bind_session(session_id)
+        _vsop_providers[session_id] = provider
     return _vsop_providers[session_id]
