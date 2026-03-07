@@ -86,6 +86,7 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
         },
         "vsop_provider": {
             "provider": vsop.get("provider", "stella"),
+            "protocols_dir": vsop.get("protocols_dir", "protocols"),
             "polling_interval": vsop.get("polling_interval", 5),
             "multi_frame": vsop.get("multi_frame", {
                 "count": 5,
@@ -105,7 +106,7 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
             "api_key": _resolve_secret(gemini_cm.get("api_key", "${GOOGLE_API_KEY}"), secrets),
             "monitoring_frames": gemini_cm.get("monitoring_frames", 20),
             "monitoring_window_seconds": gemini_cm.get("monitoring_window_seconds", 20),
-            "monitoring_interval": gemini_cm.get("monitoring_interval", 10),
+            "monitoring_interval": gemini_cm.get("monitoring_interval", 15),
             "chat_frames": gemini_cm.get("chat_frames", 5),
         },
         "labos_live": {

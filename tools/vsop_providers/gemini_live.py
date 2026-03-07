@@ -220,16 +220,16 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         return "No active protocol."
 
     if name == "list_protocols":
-        from tools.protocols.store import get_protocol_store
+        from tools.protocols.store import get_protocol_store, list_available_protocols
         from tools.display.ui import render_protocol_list
         from tools.protocols.state import get_protocol_state
         from context.manager import get_context_manager
         store = get_protocol_store()
-        protocols = store.list_protocols()
+        state = get_protocol_state()
+        protocols = list_available_protocols(store, state)
         if not protocols:
             return "No protocols are currently available in the database."
-        await render_protocol_list(store)
-        state = get_protocol_state()
+        await render_protocol_list(store, state=state)
         state.mode = "listing"
         get_context_manager().set_context("protocol_listing")
         names = ", ".join(p.get("pretty_name", p.get("name", "unknown")) for p in protocols)
@@ -239,24 +239,28 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         )
 
     if name == "start_protocol":
-        from tools.protocols.store import get_protocol_store
+        from tools.protocols.store import (
+            find_available_protocol,
+            get_protocol_store,
+            list_available_protocols,
+        )
         from tools.protocols.state import get_protocol_state, StepDetail
         from context.manager import get_context_manager
         from tools.display import ui as viture_ui
 
         store = get_protocol_store()
+        state = get_protocol_state()
         proto_name = args.get("protocol_name", "")
-        proto = store.find_protocol(proto_name)
+        proto = find_available_protocol(proto_name, store, state)
         if not proto:
             try:
                 idx = int(proto_name)
-                protocols = store.list_protocols()
+                protocols = list_available_protocols(store, state)
                 if 1 <= idx <= len(protocols):
                     proto = protocols[idx - 1]
             except (ValueError, TypeError):
                 pass
         if proto:
-            state = get_protocol_state()
             if provider and provider.is_active:
                 await provider.stop()
                 state.reset()
@@ -466,10 +470,12 @@ def _sync_state_from_provider(provider):
 
 MONITORING_PROMPT = (
     "Assess the current protocol step from the live video. "
+    "Only flag ERROR for concrete protocol execution mistakes (wrong reagent, wrong count, skipped sub-step). "
+    "Do NOT flag ERROR for: user distracted, on phone, idle, paused, not started, or away. Those are SAME.\n"
     "Reply in EXACTLY 3 lines:\n"
     "STATUS: <SAME|STEP_COMPLETE|ERROR>\n"
     "DETAIL: <1-2 sentences: what you see the user doing right now>\n"
-    "ERROR: <if ERROR, describe the mistake. Otherwise: none>"
+    "ERROR: <if ERROR, describe the specific protocol mistake with expected vs actual. Otherwise: none>"
 )
 
 
@@ -973,6 +979,14 @@ class GeminiLiveProvider(VSOPProvider):
         error_msg = parsed.get("error")
 
         if status == "error" and error_msg:
+            from tools.vsop_providers import is_non_protocol_error
+            if is_non_protocol_error(error_msg):
+                logger.debug(
+                    f"[GeminiLive] ERROR suppressed (non-protocol: distraction/idle) "
+                    f"step={self._current_step}: {error_msg}"
+                )
+                return
+
             from tools.protocols.state import get_protocol_state
             state = get_protocol_state()
             if state.is_active and not state.is_error_on_cooldown():

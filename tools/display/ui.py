@@ -96,22 +96,85 @@ _STATUS_COLORS = {
 }
 
 
+_HIDE_NEXT_STEP_AT_CHARS = 72
+_HIDE_PREV_STEP_AT_CHARS = 108
+
+
+def _clip_to_sentences(text: str, max_sentences: int = 3) -> str:
+    """Return first N sentences of text."""
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    return " ".join(sentences[:max_sentences])
+
+
+def _is_valid_base64_payload(data: str) -> bool:
+    """Quick check that a string looks like valid base64 image data."""
+    if not data or len(data) < 200:
+        return False
+    import re
+    return bool(re.match(r'^[A-Za-z0-9+/=\s]+$', data[:200]))
+
+
+def _strip_urls_for_display(text: str) -> str:
+    """Remove any leftover URLs from display text as a safety net."""
+    import re
+    text = re.sub(r'\s*\[https?://[^\]]*\]\s*', ' ', text)
+    text = re.sub(r'\s*\((?:Source:\s*)?https?://\S+?\)\s*', ' ', text)
+    text = re.sub(r'https?://\S+', '', text)
+    return re.sub(r'\s{2,}', ' ', text).strip()
+
+
+def _get_current_step_display_text(step) -> str:
+    """Return source-faithful text for the current step (up to ~3 sentences)."""
+    if step.description and len(step.description) > len(step.text):
+        return _strip_urls_for_display(_clip_to_sentences(step.description, 3))
+    return _strip_urls_for_display(step.text)
+
+
+def _get_step_window(state, has_image: bool) -> tuple:
+    """Return (win_start, win_end) indices for visible steps."""
+    steps = state.steps
+    total = len(steps)
+    cur = state.current_step  # 1-based
+
+    if has_image:
+        current = state.current_step_detail()
+        current_text_len = len(_get_current_step_display_text(current)) if current else 0
+        before_count = 1
+        after_count = 1
+        if current_text_len > _HIDE_NEXT_STEP_AT_CHARS:
+            after_count = 0
+        if current_text_len > _HIDE_PREV_STEP_AT_CHARS:
+            before_count = 0
+        win_start = max(0, cur - 1 - before_count)
+        win_end = min(total, cur + after_count)
+        return win_start, win_end
+
+    radius = _WINDOW_RADIUS
+    win_start = max(0, cur - 1 - radius)
+    win_end = min(total, cur + radius)
+    return win_start, win_end
+
+
 _WINDOW_RADIUS = 2  # show 2 before + current + 2 after = 5 visible
 
 
-def _build_step_panel_content(state) -> str:
+def _build_step_panel_content(state) -> list:
+    """Build panel blocks: list of dicts with type rich-text or base64-image."""
     parts: List[str] = []
     steps = state.steps
     total = len(steps)
     cur = state.current_step  # 1-based
+
+    current = state.current_step_detail()
+    has_image = bool(current and current.image_base64 and _is_valid_base64_payload(current.image_base64))
 
     parts.append(
         f'<size=22><color=#59D2FF><b>Step {cur}/{total}: '
         f'{state.protocol_name}</b></color></size><br><br>'
     )
 
-    win_start = max(0, cur - 1 - _WINDOW_RADIUS)
-    win_end = min(total, cur + _WINDOW_RADIUS)
+    win_start, win_end = _get_step_window(state, has_image)
 
     if win_start > 0:
         parts.append(
@@ -123,7 +186,12 @@ def _build_step_panel_content(state) -> str:
         num = i + 1
         icon = _STATUS_ICONS.get(step.status, " ")
         color = _STATUS_COLORS.get(step.status, "#888888")
-        label = f"{icon} Step {num}: {step.text}"
+
+        if num == cur:
+            label = f"{icon} Step {num}: {_get_current_step_display_text(step)}"
+        else:
+            label = f"{icon} Step {num}: {_strip_urls_for_display(step.text)}"
+
         if step.status == "error" and step.error_detail:
             label += f" ({step.error_detail[:60]})"
         size = 18 if step.status == "in_progress" else 16
@@ -135,32 +203,44 @@ def _build_step_panel_content(state) -> str:
             f'<size=14><color=#CC7722>... {remaining_below} more below</color></size><br>'
         )
 
-    current = state.current_step_detail()
+    # Build blocks list
+    blocks: list = [{"type": "rich-text", "content": "".join(parts)}]
+
+    # Image block (between steps and details)
+    if has_image:
+        blocks.append({"type": "base64-image", "content": current.image_base64})
+
+    # Details + STELLA block
+    detail_parts: List[str] = []
     if current and current.description:
-        desc = current.description[:300]
-        parts.append(
-            f'<br><size=16><color=#DDDDDD>{desc}</color></size>'
-        )
+        clean_desc = _strip_urls_for_display(current.description)
+        if clean_desc:
+            detail_parts.append(
+                f'<br><size=16><color=#DDDDDD>{clean_desc}</color></size>'
+            )
 
     if state.stella_vision_text:
-        parts.append(
+        detail_parts.append(
             f'<br><size=14><color=#59D2FF>STELLA: '
             f'{state.stella_vision_text}</color></size>'
         )
 
-    parts.append(
+    detail_parts.append(
         '<br><br><size=13><color=#999999>'
         '"next step" \u2022 "more details" \u2022 "log data" \u2022 "how to use [tool]?"'
         '</color></size>'
     )
 
-    return "".join(parts)
+    if detail_parts:
+        blocks.append({"type": "rich-text", "content": "".join(detail_parts)})
+
+    return blocks
 
 
 async def render_step_panel(state, session_id: Optional[str] = None) -> None:
     set_display_mode("protocol")
-    content = _build_step_panel_content(state)
-    await _push_panel([{"type": "rich-text", "content": content}], session_id=session_id)
+    blocks = _build_step_panel_content(state)
+    await _push_panel(blocks, session_id=session_id)
 
 
 async def render_error(state, error_msg: str, session_id: Optional[str] = None) -> None:
@@ -177,7 +257,7 @@ async def render_error(state, error_msg: str, session_id: Optional[str] = None) 
         parts.append(f'<br><size=18><color=#FF4444>{error_msg}</color></size>')
     parts.append(
         '<br><br><size=16><color=#D9D8FF>'
-        "Say 'clear' or 'continue' to move on.</color></size>"
+        "Say 'next step', 'clear', or 'continue' to move on.</color></size>"
     )
 
     await _push_panel([{"type": "rich-text", "content": "".join(parts)}], session_id=session_id)
@@ -210,7 +290,7 @@ async def render_greeting(session_id: Optional[str] = None) -> None:
 
         '<size=15><color=#FFB347>EQUIPMENT HELP</color></size><br>'
         '<size=14><color=#D9D8FF>'
-        '"how do I use a pipette?" \u2022 "what is a vortexer?"'
+        '"how do I use a pipette?" \u2022 "how do I use you?"'
         '</color></size><br><br>'
 
         '<size=15><color=#FFB347>LOG DATA / OBSERVATIONS</color></size><br>'
@@ -218,15 +298,24 @@ async def render_greeting(session_id: Optional[str] = None) -> None:
         '"log that tube 1 weighs 5 grams"<br>'
         '"note that colonies look dead"<br>'
         '"my cell culture in dish 3 looks like nothing grew"'
+        '</color></size><br><br>'
+
+        '<size=13><color=#999999>'
+        'To learn how to use Stella, say "Stella, how do I use you?"'
         '</color></size>'
     )
     set_display_mode("protocol")
     await _push_panel([{"type": "rich-text", "content": content}], session_id=session_id)
 
 
-async def render_protocol_list(store, session_id: Optional[str] = None) -> None:
+async def render_protocol_list(store, state=None, session_id: Optional[str] = None) -> None:
     set_display_mode("protocol")
-    await _push_panel(store.format_protocol_list_for_display(), session_id=session_id)
+    if state is None:
+        await _push_panel(store.format_protocol_list_for_display(), session_id=session_id)
+        return
+    from tools.protocols.store import format_protocols_for_display
+
+    await _push_panel(format_protocols_for_display(store, state), session_id=session_id)
 
 
 async def render_completion(protocol_name: str, rich_summary: str = "", session_id: Optional[str] = None) -> None:
@@ -284,6 +373,52 @@ async def render_connecting(session_id: str = "", target_session_id: Optional[st
     )
     set_display_mode("protocol")
     await _push_panel([{"type": "rich-text", "content": content}], session_id=target_session_id)
+
+
+async def render_available_commands(session_id: Optional[str] = None) -> None:
+    """Show available voice commands on the XR display."""
+    from tools.protocols.state import get_protocol_state
+    state = get_protocol_state()
+
+    content = (
+        '<size=22><b>Available Commands</b></size><br><br>'
+
+        '<size=15><color=#FFB347>NAVIGATE</color></size><br>'
+        '<size=14><color=#D9D8FF>'
+        '"next step" \u2022 "previous step" \u2022 "go to step 3"<br>'
+        '"stop protocol" \u2022 "restart protocol" \u2022 "list protocols"'
+        '</color></size><br><br>'
+
+        '<size=15><color=#FFB347>ASK ABOUT STEPS</color></size><br>'
+        '<size=14><color=#D9D8FF>'
+        '"give me more details" \u2022 "explain this step"'
+        '</color></size><br><br>'
+
+        '<size=15><color=#FFB347>EQUIPMENT HELP</color></size><br>'
+        '<size=14><color=#D9D8FF>'
+        '"how do I use a pipette?" \u2022 "how do I use a centrifuge?"'
+        '</color></size><br><br>'
+
+        '<size=15><color=#FFB347>LOG DATA</color></size><br>'
+        '<size=14><color=#D9D8FF>'
+        '"log that tube 1 weighs 5 grams" \u2022 "note colonies look dead"'
+        '</color></size><br><br>'
+
+        '<size=15><color=#FFB347>OTHER</color></size><br>'
+        '<size=14><color=#D9D8FF>'
+        '"show me an image of..." \u2022 "reset session" \u2022 "create a protocol"'
+        '</color></size>'
+    )
+
+    if state.mode == "running" and state.is_active:
+        content += (
+            '<br><br><size=16><color=#59D2FF>'
+            'Say "Stella, back to protocol" to return to your running protocol.'
+            '</color></size>'
+        )
+
+    set_display_mode("overlay")
+    await _push_panel([{"type": "rich-text", "content": content}], session_id=session_id)
 
 
 # ---------------------------------------------------------------------------

@@ -58,11 +58,17 @@ def _parse_steps(text: str) -> List[str]:
         text, re.DOTALL,
     )
     if xml_steps:
-        return [
-            f"{title}: {' '.join(body.split())}"
-            for title, body in xml_steps
-            if title.strip()
-        ]
+        _INTRO_TITLES = {"introduction", "welcome", "overview"}
+        result = []
+        for title, body in xml_steps:
+            if not title.strip():
+                continue
+            clean_body = " ".join(body.split())
+            if title.strip().lower() in _INTRO_TITLES:
+                result.append(clean_body)
+            else:
+                result.append(f"{title}: {clean_body}")
+        return result
 
     steps: List[str] = []
     for line in text.splitlines():
@@ -108,7 +114,10 @@ def _parse_steps(text: str) -> List[str]:
 
 def _pretty_name(filename: str) -> str:
     stem = Path(filename).stem
-    return stem.replace("_", " ").replace("-", " ").title()
+    # Preserve human-authored capitalization and punctuation (e.g., PCR, STELLA, "Pilot - PCR")
+    # while still making underscore-separated filenames readable.
+    pretty = stem.replace("_", " ")
+    return re.sub(r"\s+", " ", pretty).strip()
 
 
 class ProtocolStore:
@@ -226,3 +235,69 @@ def init_protocol_store(config: dict) -> ProtocolStore:
         protocols_dir = config.get("vsop_provider", {}).get("protocols_dir", "protocols")
         _protocol_store = ProtocolStore(protocols_dir)
     return _protocol_store
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped protocol helpers (merge disk + in-memory)
+# ---------------------------------------------------------------------------
+
+def build_protocol_entry(name: str, steps: List[str], raw: str) -> Dict:
+    """Build a protocol dict compatible with ProtocolStore cache entries."""
+    return {
+        "name": name,
+        "pretty_name": name,
+        "steps": steps,
+        "step_count": len(steps),
+        "raw": raw,
+    }
+
+
+def list_available_protocols(store: ProtocolStore, state) -> List[dict]:
+    """Merge disk-backed protocols with session-scoped ones."""
+    disk = store.list_protocols()
+    session = []
+    for key, entry in getattr(state, "session_protocols", {}).items():
+        session.append({
+            "name": entry.get("name", key),
+            "pretty_name": entry.get("pretty_name", key),
+            "steps": entry.get("steps", []),
+            "step_count": len(entry.get("steps", [])),
+        })
+    return disk + session
+
+
+def find_available_protocol(query: str, store: ProtocolStore, state) -> Optional[dict]:
+    """Fuzzy-match across disk and session protocols."""
+    found = store.find_protocol(query)
+    if found:
+        return found
+    query_lower = query.lower().strip()
+    for key, entry in getattr(state, "session_protocols", {}).items():
+        pn = entry.get("pretty_name", key).lower()
+        if query_lower == pn or query_lower in pn:
+            return entry
+    candidates = {
+        entry.get("pretty_name", key).lower(): entry
+        for key, entry in getattr(state, "session_protocols", {}).items()
+    }
+    if candidates:
+        matches = difflib.get_close_matches(query_lower, candidates.keys(), n=1, cutoff=0.4)
+        if matches:
+            return candidates[matches[0]]
+    return None
+
+
+def format_protocols_for_display(store: ProtocolStore, state) -> List[Dict[str, str]]:
+    """Build rich-text list merging disk + session protocols."""
+    protocols = list_available_protocols(store, state)
+    if not protocols:
+        return [{"type": "rich-text", "content": "<size=20>No protocols available.</size>"}]
+    lines = ["<size=25><b>Available Protocols</b></size><br><br>"]
+    for i, proto in enumerate(protocols, 1):
+        lines.append(
+            f'<size=20><color=#59D2FF>{i}.</color> '
+            f'{proto["pretty_name"]} '
+            f'<color=#AAAAAA>({proto.get("step_count", len(proto.get("steps", [])))} steps)</color></size><br>'
+        )
+    lines.append("<br><size=18><color=#D9D8FF>Say the protocol name to start.</color></size>")
+    return [{"type": "rich-text", "content": "".join(lines)}]

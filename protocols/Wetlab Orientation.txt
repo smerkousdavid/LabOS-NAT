@@ -1,0 +1,133 @@
+<wetlab_orientation_protocol>
+  <title>Introduction to the WetLab: Equipment Orientation</title>
+  <goal>To gain proficiency in the operation, safety, and maintenance of core laboratory instruments through hands-on interaction and documentation.</goal>
+
+  <materials>
+    <item>Micropipettes (P20, P200, P1000) and tips</item>
+    <item>Analytical Balance</item>
+    <item>Vortex Mixer</item>
+    <item>Centrifuge</item>
+    <item>Thermocycler</item>
+    <item>0.2 mL PCR tubes, 0.5 mL and 1.5 mL microcentrifuge tubes</item>
+    <item>dH2O (for mock samples)</item>
+    <item>70% Ethanol and Kimwipes</item>
+    <item>Nitrile Gloves</item>
+  </materials>
+
+  <protocol_steps>
+    <step id="1" title="Introduction">
+      Hello and welcome to the wetlab! In this protocol you will be learning about the different components of the laboratory that you will be using today! To begin learning more, say "STELLA next."
+      
+    </step>
+
+    <step id="2" title="Personal Protective Equipment">
+      Put on fresh nitrile gloves. If you touch any non-sterile surface (like AR glasses or a phone), you must change or sanitize them. [https://m.media-amazon.com/images/I/61jppFwvrwS.jpg]
+      
+    </step>
+
+    <step id="3" title="Workplace Sanitization">
+      Spray gloved hands and the "Work Zone" benchtop with 70% Ethanol; wipe the bench with a Kimwipe. [https://assets.fishersci.com/TFS-Assets/CCG/Vitlab/product-images/952861.jpg-650.jpg]
+      
+    </step>
+
+    <step id="4" title="Tool Sterilization">
+      Wipe the shaft of the micropipettes with an ethanol-dampened cloth. [https://th.bing.com/th/id/R.620c2ace051f58fb5cf2e64842bc0034?rik=MEK%2bvc%2bHAO57Xw&riu=http%3a%2f%2fpressbooks.hccfl.edu%2fbsc2010l%2fwp-content%2fuploads%2fsites%2f22%2f2023%2f03%2fP20-1024x576.png&ehk=pIjQos6qLlFSX%2fgbOLNSA1UZVoJ4%2fBwtwXri2migH0I%3d&risl=&pid=ImgRaw&r=0]
+      
+    </step>
+
+    <step id="5" title="Tube Labeling">
+      Use a marker to label the side or lid of every tube (0.2 mL, 0.5 mL, and 1.5 mL).  [https://tse4.mm.bing.net/th/id/OIP.9-6-91uyWfdo5-OoL8KapQHaDp?rs=1&pid=ImgDetMain&o=7&rm=3]
+      
+    </step>
+
+    <step id="6" title="Dry Weight Recording">
+      Place each empty tube on the Analytical Balance and record the "Dry Weight" to the nearest 0.1 mg (0.0001 g). [https://tse3.mm.bing.net/th/id/OIP._kXOJZ2IKtuk4fLK5Ir31AHaEK?rs=1&pid=ImgDetMain&o=7&rm=3]
+      
+    </step>
+
+    <step id="7" title="Pipette Volume Selection">
+      Choose a pipette (P20, P200, or P1000) based on its range. Rotate the volume adjustment dial to the desired setting. [https://blog.certifiedmtp.com/wp-content/uploads/2024/06/876f7751-bae1-477c-a8c0-1f4cfa3b7989.png]
+      
+    </step>
+
+    <step id="8" title="Tip Attachment">
+      Press the pipette shaft firmly into a sterile tip in the box; never touch the tip with your hands. [https://microbenotes.com/wp-content/uploads/2023/06/Parts-of-Micropipette.jpg]
+      
+    </step>
+
+    <step id="9" title="Aspiration Preparation">
+      Press the plunger to the FIRST STOP before entering the liquid. [https://www.microlit.us/wp-content/uploads/2021/01/A-1006x1024.jpg]
+      
+    </step>
+
+    <step id="10" title="Liquid Aspiration">
+      Submerge the tip vertically into the dH2O and slowly release the plunger to draw up the liquid. [https://www.microlit.us/wp-content/uploads/2021/01/A-1006x1024.jpg]
+      
+    </step>
+
+    <step id="11" title="Dispensing">
+      Touch the tip to the side of the receiving tube and press the plunger to the SECOND STOP to expel all liquid. [https://www.microlit.us/wp-content/uploads/2021/01/A-1006x1024.jpg]
+      
+    </step>
+
+    <step id="12" title="Tip Disposal">
+      Eject the used tip into the biohazard bin using the tip ejector button. [https://2.bp.blogspot.com/-uKsevRz57b8/WIQAxIXSs9I/AAAAAAAABuU/5w97uwvvhaICTo1Vd5Qz20GOA2ubaiYKgCEw/s1600/Micropipette.jpg]
+      
+    </step>
+
+    <step id="13" title="Vortex Setup">
+      Ensure the vortex mixer is in "Touch" mode and set the speed to Level 8–10. [https://tse3.mm.bing.net/th/id/OIP.NzFV6Go-9PWkc0lQgmRhGQHaHa?rs=1&pid=ImgDetMain&o=7&rm=3]
+      
+    </step>
+
+    <step id="14" title="Vortex Mixing">
+      Grip the tube near the cap and press the bottom into the rubber cup at a 15°-20° angle. [https://tse3.mm.bing.net/th/id/OIP.NzFV6Go-9PWkc0lQgmRhGQHaHa?rs=1&pid=ImgDetMain&o=7&rm=3]
+      
+          </step>
+
+    <step id="15" title="Mix Verification">
+      Vortex for 5–10 seconds until the liquid reaches at least halfway up the tube, ensuring a full "whirlpool" effect. [https://th.bing.com/th/id/OIP.eajn5DBR2qDnyc0LYh7QGgHaHa?w=194&h=194&c=7&r=0&o=7&pid=1.7&rm=3]
+      
+    </step>
+
+    <step id="16" title="Centrifuge Balancing">
+      Load tubes symmetrically (directly opposite each other) in the rotor. Ensure opposite tubes have identical volumes. [https://th.bing.com/th/id/OIP.YfRJKTGtlKiKjR3ejLdFEAHaHa?w=183&h=183&c=7&r=0&o=7&pid=1.7&rm=3]
+      
+    </step>
+
+    <step id="17" title="Centrifuge Operation">
+      Secure the internal and main lids. Start the run and stay until the device reaches full speed. [https://th.bing.com/th/id/OIP.yxwdmAQ2fs-7Zn_RGBUJbgHaHa?w=183&h=183&c=7&r=0&o=7&pid=1.7&rm=3]
+      
+    </step>
+
+    <step id="18" title="Thermocycler Loading">
+      Press PCR tubes firmly into the thermocycler wells to avoid air gaps. [https://th.bing.com/th/id/OIP.yYojpN2YXGQ67nRfy12z_gHaHa?w=173&h=180&c=7&r=0&o=7&pid=1.7&rm=3]
+      
+    </step>
+
+    <step id="19" title="Lid Pressure Balancing">
+      If using only a few tubes, place empty "dummy" tubes in the four corners of the block to balance the lid. [https://th.bing.com/th/id/OIP.mBDZV6aDPqtOIbgf_4PY_gHaJ4?w=130&h=180&c=7&r=0&o=7&pid=1.7&rm=3]
+      
+    </step>
+
+    <step id="20" title="Software Volume Check">
+      Verify the programmed reaction volume matches your actual volume to ensure accurate thermal ramping.
+      
+    </step>
+
+    <step id="21" title="Visual Observations">
+      Note any anomalies, such as bubbles or splashes on the tube lids, in your documentation.
+      
+    </step>
+  </protocol_steps>
+
+  <common_errors>
+    <error>Dialing past range limits. </error>
+    <error>Centrifuge Imbalance. </error>
+    <error>Aerosols: Opening immediately after vortexing. </error>
+  </common_errors>
+
+  <notes>
+    <note>Waste Management: Ensure used tips are placed in the specific biohazard/sharps container as shown in the .</note>
+  </notes>
+</wetlab_orientation_protocol>

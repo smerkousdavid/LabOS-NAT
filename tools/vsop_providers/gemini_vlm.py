@@ -163,6 +163,64 @@ def _build_tool_declarations():
             description="Get all errors recorded during the current protocol run.",
             parameters=types.Schema(type="OBJECT", properties={}),
         ),
+        types.FunctionDeclaration(
+            name="image_search",
+            description="Search for images related to a query and display on XR glasses.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "query": types.Schema(type="STRING", description="Image search query"),
+                },
+                required=["query"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="reset_session",
+            description="Reset the session to main menu, clearing all protocol state. Use for 'go home', 'reset', 'main menu'.",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
+        types.FunctionDeclaration(
+            name="available_commands",
+            description="Show available voice commands on AR display. Use for 'what can I do?', 'help', 'what can you do?' -- NOT for 'what can I run?' (that's list_protocols).",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
+        types.FunctionDeclaration(
+            name="practice_guidance",
+            description="Look up guidance for lab equipment or technique. Adapts to current protocol context. Use for 'how do I use a pipette?', 'how to use centrifuge?'.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "query": types.Schema(type="STRING", description="Equipment or technique name"),
+                },
+                required=["query"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="start_protocol_discussion",
+            description="Start a protocol discussion to design a temporary protocol.",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
+        types.FunctionDeclaration(
+            name="update_protocol_discussion",
+            description="Update the draft protocol text during discussion mode.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "text": types.Schema(type="STRING", description="Updated protocol text"),
+                },
+                required=["text"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="run_discussed_protocol",
+            description="Compile and start the discussed protocol.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "name": types.Schema(type="STRING", description="Protocol name"),
+                },
+            ),
+        ),
     ]
 
 
@@ -219,16 +277,16 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         return "No active protocol."
 
     if name == "list_protocols":
-        from tools.protocols.store import get_protocol_store
+        from tools.protocols.store import get_protocol_store, list_available_protocols
         from tools.display.ui import render_protocol_list
         from tools.protocols.state import get_protocol_state
         from context.manager import get_context_manager
         store = get_protocol_store()
-        protocols = store.list_protocols()
+        state = get_protocol_state(sid)
+        protocols = list_available_protocols(store, state)
         if not protocols:
             return "No protocols are currently available in the database."
-        await render_protocol_list(store)
-        state = get_protocol_state(sid)
+        await render_protocol_list(store, state=state)
         state.mode = "listing"
         get_context_manager().set_context("protocol_listing")
         names = ", ".join(p.get("pretty_name", p.get("name", "unknown")) for p in protocols)
@@ -238,24 +296,28 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         )
 
     if name == "start_protocol":
-        from tools.protocols.store import get_protocol_store
+        from tools.protocols.store import (
+            find_available_protocol,
+            get_protocol_store,
+            list_available_protocols,
+        )
         from tools.protocols.state import get_protocol_state, StepDetail
         from context.manager import get_context_manager
         from tools.display import ui as viture_ui
 
         store = get_protocol_store()
         proto_name = args.get("protocol_name", "")
-        proto = store.find_protocol(proto_name)
+        state = get_protocol_state(sid)
+        proto = find_available_protocol(proto_name, store, state)
         if not proto:
             try:
                 idx = int(proto_name)
-                protocols = store.list_protocols()
+                protocols = list_available_protocols(store, state)
                 if 1 <= idx <= len(protocols):
                     proto = protocols[idx - 1]
             except (ValueError, TypeError):
                 pass
         if proto:
-            state = get_protocol_state(sid)
             if provider and provider.is_active:
                 await provider.stop()
                 state.reset()
@@ -437,6 +499,45 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
             return "No experiment data or errors found for this session."
         return "\n".join(context_parts)
 
+    if name == "image_search":
+        query = args.get("query", "")
+        from tools.common.web import image_search
+        result = await image_search(query=query)
+        return str(result)
+
+    if name == "reset_session":
+        from tools.protocols.tools import reset_session
+        result = await reset_session()
+        return str(result)
+
+    if name == "available_commands":
+        from tools.protocols.tools import available_commands
+        result = await available_commands()
+        return str(result)
+
+    if name == "practice_guidance":
+        query = args.get("query", "")
+        from tools.protocols.tools import practice_guidance
+        result = await practice_guidance(query=query)
+        return str(result)
+
+    if name == "start_protocol_discussion":
+        from tools.protocols.tools import start_protocol_discussion
+        result = await start_protocol_discussion()
+        return str(result)
+
+    if name == "update_protocol_discussion":
+        text = args.get("text", "")
+        from tools.protocols.tools import update_protocol_discussion
+        result = await update_protocol_discussion(text=text)
+        return str(result)
+
+    if name == "run_discussed_protocol":
+        pname = args.get("name", "Custom Protocol")
+        from tools.protocols.tools import run_discussed_protocol
+        result = await run_discussed_protocol(name=pname)
+        return str(result)
+
     logger.warning(f"[GeminiVLM] Unknown tool call: {name}")
     return f"Unknown tool: {name}"
 
@@ -461,23 +562,40 @@ def _sync_state_from_provider(provider):
 # ---------------------------------------------------------------------------
 
 MONITORING_PROMPT = """\
-You are STELLA, a lab protocol monitor. Your ONLY job: detect errors and verify step completion. You do NOT advance the protocol.
+You are STELLA, a lab protocol monitor. Your ONLY job: detect concrete protocol execution mistakes and verify step completion. You do NOT advance the protocol.
 
 Protocol: {protocol_name} ({total_steps} steps)
 {all_steps_block}
 
 Current step ({current_step_num}/{total_steps}): {current_step_text}
 Description: {step_description}
+Known mistakes to watch for: {common_errors_block}
 Context: {protocol_context_block}
 
 {recent_context}
+
+Classify as EXACTLY one of:
+
+STATUS: SAME -- Default. The user is working, pausing, idle, or not yet started. No protocol deviation observed.
+STATUS: STEP_COMPLETE -- The required outcome of the current step is clearly achieved in the final frames. User must still say "next step" to advance.
+STATUS: ERROR -- You have VISUAL EVIDENCE of a concrete protocol mistake DURING the step execution. Examples: wrong reagent picked up, incorrect number of tubes/wells handled (e.g. pipetted 3 wells when step says 5), skipped a required sub-step that is now impossible to redo, used wrong equipment.
+
+IMPORTANT: You are watching through AR glasses mounted on ONE person's head. Focus ONLY on what the wearer's hands are doing. Ignore other people in the room -- their actions are irrelevant.
+
+CRITICAL -- these are NOT errors, always return SAME:
+- User is on their phone, distracted, talking, writing, or looking elsewhere.
+- User has not started the step yet or is pausing between actions.
+- User walked away or is in another area.
+- Another person in view is doing something unrelated.
+- Insufficient visual evidence to confirm a mistake happened.
+When in doubt, return SAME. Only flag ERROR when you can describe exactly what wrong action the wearer performed.
 
 {frame_count} frames from last {window_secs}s (oldest first). Final frames = current state.
 
 Reply EXACTLY (3 lines, no extra text):
 STATUS: <SAME|STEP_COMPLETE|ERROR>
 DETAIL: <2 sentences max: what you see>
-ERROR: <if ERROR, describe mistake. Otherwise: none>\
+ERROR: <if ERROR, describe the specific protocol mistake with expected vs actual. Otherwise: none>\
 """
 
 
@@ -745,6 +863,7 @@ class GeminiVLMProvider(VSOPProvider):
         )
 
         step_description = ""
+        common_errors_block = "  (none specified)"
         try:
             from tools.protocols.state import get_protocol_state
             state = get_protocol_state(self.get_bound_session_id())
@@ -752,6 +871,8 @@ class GeminiVLMProvider(VSOPProvider):
                 sd = state.steps[idx]
                 if sd.description:
                     step_description = sd.description
+                if sd.common_errors:
+                    common_errors_block = "\n".join(f"  - {e}" for e in sd.common_errors)
         except Exception:
             pass
 
@@ -776,6 +897,7 @@ class GeminiVLMProvider(VSOPProvider):
             current_step_num=self._current_step,
             current_step_text=self._steps[idx],
             step_description=step_description or "No additional description available.",
+            common_errors_block=common_errors_block,
             frame_count=len(frames),
             window_secs=self._monitoring_window_s,
             recent_context=recent_context,
@@ -852,6 +974,14 @@ class GeminiVLMProvider(VSOPProvider):
         error_msg = parsed.get("error")
 
         if status == "error" and error_msg:
+            from tools.vsop_providers import is_non_protocol_error
+            if is_non_protocol_error(error_msg):
+                logger.debug(
+                    f"[GeminiVLM] ERROR suppressed (non-protocol: distraction/idle) "
+                    f"step={self._current_step}: {error_msg}"
+                )
+                return
+
             from tools.protocols.state import get_protocol_state
             state = get_protocol_state(self.get_bound_session_id())
             if state.is_active and not state.is_error_on_cooldown():
@@ -930,6 +1060,16 @@ class GeminiVLMProvider(VSOPProvider):
         self._step_complete_announced = False
         self._last_pushed_detail = ""
         return await super().manual_goto(step_num)
+
+    async def validate_external_image(self, image_b64: str, description: str) -> bool:
+        """Use Gemini to check if an image matches a description."""
+        try:
+            prompt = f'Does this image accurately depict: "{description}"? Reply YES or NO only.'
+            result = await self._generate(prompt, image_frames=[image_b64])
+            return "YES" in result.upper()
+        except Exception as exc:
+            logger.debug(f"[GeminiVLM] Image validation failed: {exc}")
+            return True
 
     # -- prompt building -----------------------------------------------------
 

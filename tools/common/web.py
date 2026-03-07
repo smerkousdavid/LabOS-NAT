@@ -323,6 +323,45 @@ async def web_search(
     return "\n".join(lines)
 
 
+def _get_current_step_explicit_image():
+    """Return the current step's embedded image base64 if present."""
+    try:
+        from tools.protocols.state import get_protocol_state
+        state = get_protocol_state()
+        detail = state.current_step_detail()
+        if detail and detail.image_base64:
+            return detail.image_base64
+    except Exception:
+        pass
+    return None
+
+
+async def _validate_candidate_image(image_url: str, description: str) -> str | None:
+    """Fetch an image URL, validate via VLM, return base64 if valid."""
+    import base64
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(image_url)
+            if resp.status_code != 200 or len(resp.content) < 500:
+                return None
+            b64 = base64.b64encode(resp.content).decode("ascii")
+            if len(b64) < 200:
+                return None
+        try:
+            from tools.vsop_providers import get_vsop_provider
+            provider = get_vsop_provider()
+            if provider:
+                valid = await provider.validate_external_image(b64, description)
+                if not valid:
+                    return None
+        except Exception:
+            pass
+        return b64
+    except Exception:
+        return None
+
+
 @function_tool
 @toggle_dashboard("image_search")
 async def image_search(
@@ -333,6 +372,15 @@ async def image_search(
     """Search the web for images and display the best one on the AR glasses.
     The image is automatically shown on the XR panel -- just give a brief
     spoken description of what was found."""
+    explicit = _get_current_step_explicit_image()
+    if explicit:
+        from tools.display.ui import render_rich_panel
+        await render_rich_panel([
+            {"type": "base64-image", "content": explicit},
+            {"type": "rich-text", "content": f"<size=16><color=#D9D8FF>Step image for: {query}</color></size>"},
+        ])
+        return f"Displaying step image for '{query}'."
+
     try:
         loop = asyncio.get_running_loop()
         results = await loop.run_in_executor(None, _image_search, query, 10)
@@ -353,7 +401,8 @@ async def image_search(
             image_url = r.get(url_key, "")
             if not image_url:
                 continue
-            image_b64 = await fetch_image_as_base64(image_url)
+            validated_b64 = await _validate_candidate_image(image_url, query)
+            image_b64 = validated_b64 if validated_b64 else await fetch_image_as_base64(image_url)
             if image_b64:
                 try:
                     from tools.common.rich_panel import RichPanelBuilder, push_to_display

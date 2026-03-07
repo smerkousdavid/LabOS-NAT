@@ -143,6 +143,11 @@ def get_gemini_mode() -> str:
     return cfg.get("mode", "full")
 
 
+def should_interject_error() -> bool:
+    """Return True if errors should overlay/TTS-interject the user."""
+    return bool(_config.get("interject_error", False))
+
+
 # Backward-compat aliases (referenced by older code paths)
 get_gemini_live_config = get_gemini_config
 is_gemini_live_enabled = is_gemini_enabled
@@ -188,6 +193,12 @@ def _initialize_tool_overrides(config: Dict[str, Any]):
         "restart_protocol",
         "clear_error",
         "get_protocol_status",
+        "reset_session",
+        "available_commands",
+        "practice_guidance",
+        "start_protocol_discussion",
+        "update_protocol_discussion",
+        "run_discussed_protocol",
     ):
         seed(name, vsop_enabled)
 

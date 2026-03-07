@@ -29,16 +29,22 @@ from ws_protocol import INBOUND_TYPES
 # Fast-path patterns: bypass LLM for simple step navigation
 # ---------------------------------------------------------------------------
 
+_WAKE_PREFIX_RE = re.compile(
+    r"^(hey\s+)?stell?a[,\s]*", re.IGNORECASE
+)
 _NEXT_PATTERNS = re.compile(
-    r"\b(next\s*step|next|advance|skip|move\s*on|continue)\b", re.IGNORECASE
+    r"\b(next\s*step|next\s*up|next|advance|skip|move\s*on|go\s*next|continue)\b",
+    re.IGNORECASE,
 )
 _PREV_PATTERNS = re.compile(
-    r"\b(previous\s*step|prev\s*step|go\s*back|previous|back)\b", re.IGNORECASE
+    r"\b(previous\s*step|prev\s*step|go\s*back|previous|back\s*up|step\s*back|last\s*step|back)\b",
+    re.IGNORECASE,
 )
 _QUESTION_INDICATORS = re.compile(
     r"\b(what|when|how|why|where|which|tell\s*me|explain|describe|detail)\b|\?",
     re.IGNORECASE,
 )
+_HAS_STEP_NUMBER = re.compile(r"\b(step\s*\d|\d+\s*step|go\s*to|skip\s*to|jump\s*to|\bstep\s+\w+\b.*\d)\b", re.IGNORECASE)
 _STEP_ANNOUNCE_RE = re.compile(r"^Step\s+\d+:", re.IGNORECASE)
 
 
@@ -198,6 +204,8 @@ async def _try_fast_path(session_id: str, text: str) -> Optional[str]:
     cleaned = text.strip()
     if _QUESTION_INDICATORS.search(cleaned):
         return None
+    if _HAS_STEP_NUMBER.search(cleaned):
+        return None
 
     if _NEXT_PATTERNS.search(cleaned):
         logger.info(f"[FastPath] next_step triggered by: {cleaned}")
@@ -295,31 +303,28 @@ def _start_bg_buffer(session_id: str, stream_info: dict) -> None:
 
 
 async def _handle_protocol_push(session_id: str, msg: dict) -> None:
-    """Write runtime-pushed protocols to the protocols/ directory."""
-    from pathlib import Path
+    """Store runtime-pushed protocols in per-session memory (not disk)."""
+    from tools.protocols.state import get_protocol_state
+    from tools.protocols.store import build_protocol_entry, _parse_steps
 
     protocols = msg.get("protocols", [])
     if not protocols:
         return
 
-    proto_dir = Path("protocols")
-    proto_dir.mkdir(parents=True, exist_ok=True)
-
+    state = get_protocol_state(session_id)
     count = 0
     for proto in protocols:
         name = proto.get("name", "").strip()
         content = proto.get("content", "").strip()
         if not name or not content:
             continue
-        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
-        if not safe_name.endswith((".txt", ".md", ".yaml", ".json", ".csv")):
-            safe_name += ".txt"
-        dest = proto_dir / safe_name
-        dest.write_text(content, encoding="utf-8")
+        steps = _parse_steps(content)
+        safe_key = name.lower().replace(" ", "_")
+        state.session_protocols[safe_key] = build_protocol_entry(name, steps, content)
         count += 1
 
     if count:
-        logger.info(f"[WS] Received {count} protocol(s) from runtime session {session_id[:8]}")
+        logger.info(f"[WS] Stored {count} session protocol(s) for {session_id[:8]} (in-memory)")
 
 
 async def _handle_fast_command(session_id: str, msg: dict, ws: WebSocket):
@@ -368,6 +373,20 @@ async def _handle_user_message(session_id: str, msg: dict, ws: WebSocket):
     _current_session_id.set(session_id)
     text = msg.get("text", "").strip()
     if not text:
+        return
+
+    # --- Fast path: strip wake-word prefix and check for simple nav commands ---
+    normalized = _WAKE_PREFIX_RE.sub("", text).strip()
+    fast_result = await _try_fast_path(session_id, normalized or text)
+    if fast_result:
+        tts_ok = not bool(_STEP_ANNOUNCE_RE.match(fast_result.strip()))
+        await ws.send_json({
+            "type": "agent_response",
+            "text": fast_result,
+            "tts": tts_ok,
+        })
+        await _emit_labos_chat(session_id, "user", text)
+        await _emit_labos_chat(session_id, "assistant", fast_result)
         return
 
     from config import get_gemini_mode
@@ -659,11 +678,11 @@ async def _cleanup(session_id: str):
     except Exception as exc:
         logger.warning(f"[WS] VSOP cleanup failed for {session_id[:8]}: {exc}")
 
-    # Reset protocol state
+    # Reset protocol state (including session-scoped protocols)
     try:
         from tools.protocols.state import _protocol_states
         if session_id in _protocol_states:
-            _protocol_states[session_id].reset()
+            _protocol_states[session_id].reset(clear_session_protocols=True)
     except Exception as exc:
         logger.warning(f"[WS] Protocol state cleanup failed for {session_id[:8]}: {exc}")
 

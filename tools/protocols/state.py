@@ -21,6 +21,9 @@ class StepDetail:
     status: str = "pending"  # pending | in_progress | completed | error
     error_detail: Optional[str] = None
     robot_protocol: Optional[str] = None  # when set, auto-triggers this robot protocol on step entry
+    image_url: str = ""
+    image_base64: str = ""
+    image_query: str = ""
 
 
 @dataclass
@@ -50,7 +53,10 @@ class ProtocolState:
     monitoring_medium: List[str] = field(default_factory=list)
     monitoring_high: List[str] = field(default_factory=list)
 
-    def reset(self, clear_completed_runs: bool = False):
+    # Session-scoped protocols pushed from runtime (not persisted to disk)
+    session_protocols: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def reset(self, clear_completed_runs: bool = False, clear_session_protocols: bool = False):
         self.is_active = False
         self.mode = "idle"
         self.protocol_name = ""
@@ -70,6 +76,8 @@ class ProtocolState:
         self.monitoring_high = []
         if clear_completed_runs:
             self.completed_runs = []
+        if clear_session_protocols:
+            self.session_protocols = {}
 
     def elapsed_str(self) -> str:
         if self.start_time <= 0:

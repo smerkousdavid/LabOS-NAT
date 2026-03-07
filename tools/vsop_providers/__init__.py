@@ -50,6 +50,32 @@ StepEventCallback = Callable[[StepEvent], Coroutine[Any, Any, None]]
 
 
 # ---------------------------------------------------------------------------
+# Non-protocol error suppression filter
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_NON_PROTOCOL_ERROR_PATTERNS = _re.compile(
+    r"(?:distract|on (?:their |the |a )?phone|has not (?:initiated|started|begun)"
+    r"|not yet (?:initiated|started|begun)|idle|looking away|another (?:area|location)"
+    r"|talking|writing|walking away|pausing|no (?:activity|action|motion)"
+    r"|failed to (?:initiate|start|begin)|has not performed"
+    r"|another person|other person|bystander|someone else|colleague"
+    r"|incorrect environment|not in a lab|not at .* (?:workspace|bench|station))",
+    _re.IGNORECASE,
+)
+
+
+def is_non_protocol_error(error_text: str) -> bool:
+    """Return True if the error text describes distraction/inactivity, not a
+    real protocol execution mistake.  Used as a post-parse guard to suppress
+    false-positive ERRORs from the monitoring VLM."""
+    if not error_text:
+        return False
+    return bool(_NON_PROTOCOL_ERROR_PATTERNS.search(error_text))
+
+
+# ---------------------------------------------------------------------------
 # Abstract provider
 # ---------------------------------------------------------------------------
 
@@ -182,6 +208,10 @@ class VSOPProvider(ABC):
         ))
         return f"Restarted protocol. Now on step 1: {step_text}"
 
+    async def validate_external_image(self, image_b64: str, description: str) -> bool:
+        """Check if an image matches a description. Override in subclasses."""
+        return True
+
     # -- event callback ------------------------------------------------------
 
     def set_on_step_event(self, callback: StepEventCallback):
@@ -189,6 +219,9 @@ class VSOPProvider(ABC):
 
     async def _emit(self, event: StepEvent):
         logger.info(f"VSOP event: {event}")
+        if self._session_id:
+            from config import _current_session_id
+            _current_session_id.set(self._session_id)
         if self._on_step_event:
             try:
                 await self._on_step_event(event)

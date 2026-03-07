@@ -162,7 +162,7 @@ class ContextManager:
         self._context: str = "main_menu"
 
     def set_context(self, ctx: str):
-        if ctx not in ("main_menu", "protocol_listing", "protocol_running", "protocol_completed"):
+        if ctx not in ("main_menu", "protocol_listing", "protocol_running", "protocol_completed", "protocol_discussion"):
             logger.warning(f"ContextManager: unknown context '{ctx}', ignoring")
             return
         logger.info(f"ContextManager: {self._context} -> {ctx}")
@@ -203,11 +203,13 @@ class ContextManager:
             state: Optional ProtocolState (needed for running/listing contexts).
         """
         if self._context == "protocol_listing":
-            from tools.protocols.store import get_protocol_store
+            from tools.protocols.store import get_protocol_store, list_available_protocols
+            from tools.protocols.state import get_protocol_state
             store = get_protocol_store()
-            protocols = store.list_protocols()
+            pstate = state or get_protocol_state()
+            protocols = list_available_protocols(store, pstate)
             listing_text = "\n".join(
-                f"  {i}. {p['pretty_name']} ({p['step_count']} steps)"
+                f"  {i}. {p['pretty_name']} ({p.get('step_count', len(p.get('steps', [])))} steps)"
                 for i, p in enumerate(protocols, 1)
             )
             return _build_listing_prompt(listing_text)
@@ -287,6 +289,11 @@ class ContextManager:
                 experiment_data_block=state.experiment_data_xml(),
                 stella_observation_history=stella_obs_history,
             )
+
+        if self._context == "protocol_discussion":
+            template = _load_mode_template("protocol_discussion")
+            draft = state.extra_context if state else ""
+            return template.replace("{discussion_draft}", draft or "(no draft yet)")
 
         return _load_mode_template("main_menu")
 

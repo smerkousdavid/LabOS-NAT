@@ -1,0 +1,78 @@
+<pcr_protocol>
+  <title>PCR for 5 DNA Fragments (F1-F5)</title>
+  <goal>Create DNA fragments for 5 different targets labeled: F1/R1, F2/R2, F3/R3, F4/R4, and F5/R5.</goal>
+
+  <materials>
+    <item>Micropipettes (P20, P200) and tips</item>
+    <item>5X QS buffer</item>
+    <item>5X G/C buffer</item>
+    <item>Forward Primers and Reverse Primers (F1-F5/R1-R5)</item>
+    <item>dNTPs</item>
+    <item>Q5Pol*HS</item>
+    <item>pDNA (500ng template)</item>
+    <item>dH2O</item>
+    <item>EDTA</item>
+    <item>5 PCR tubes (0.2 mL)</item>
+    <item>1 Centrifuge tube (0.5 mL)</item>
+    <item>Centrifuge</item>
+    <item>Vortex</item>
+    <item>Analytical Balance</item>
+    <item>Thermocycler</item>
+  </materials>
+
+  <reaction_mix_per_reaction>
+    <reagent name="5X QS buffer">5 uL</reagent>
+    <reagent name="5X G/C buffer">5 uL</reagent>
+    <reagent name="Forward Primer">0.5 uL</reagent>
+    <reagent name="Reverse Primer">0.5 uL</reagent>
+    <reagent name="dNTPs">0.5 uL</reagent>
+    <reagent name="Q5Pol*HS">0.25 uL</reagent>
+    <reagent name="pDNA (500ng)">13.25 uL</reagent>
+    <reagent name="dH2O">Adjust to reach total volume</reagent>
+    <total>25 uL</total>
+  </reaction_mix_per_reaction>
+
+  <protocol_steps>
+    <step id="1" title="Initial Weighing">
+      Acquire and weigh the 5 empty PCR tubes (0.2 mL) and the single centrifuge tube (0.5 mL). Record these values in your data table before proceeding.
+    </step>
+
+    <step id="2" title="Reagent Preparation">
+      For every reaction, mix the reagents according to the reaction mix table. Note: if creating a master mix, add an additional 10% volume for each shared reagent to account for pipetting loss.
+    </step>
+
+    <step id="3" title="Master Mix QC (Conditional)">
+      If using a master mix: Weigh the final master mix in the 0.5 mL centrifuge tube and record the value. Skip this step if preparing reactions individually.
+    </step>
+
+    <step id="4" title="Master Mix Homogenization (Conditional)">
+      If using a master mix: Vortex the tube briefly and then centrifuge to collect the liquid at the bottom. Skip this step if preparing reactions individually.
+    </step>
+
+    <step id="5" title="Aliquot and Transfer">
+      Transfer the proper amount of liquid (calculated to reach 25 uL total) into each labeled PCR tube.
+    </step>
+
+    <step id="6" title="Tube Homogenization">
+      Vortex the 5 PCR tubes briefly and then centrifuge to ensure all reagents are at the base of the tube and well-mixed.
+    </step>
+
+    <step id="7" title="Seating Check">
+      Place all 5 PCR tubes into the thermocycler and close the lid for 5 seconds. This ensures proper seating and cap security.
+    </step>
+
+    <step id="8" title="Final Weight Verification">
+      Remove the tubes from the thermocycler and record the final weight of each PCR tube. Compare against initial weights to verify volume accuracy.
+    </step>
+
+    <step id="9" title="Post-PCR Dilution">
+      Create a 1:25 dilution of the sample using EDTA (1 part sample to 24 parts EDTA).
+    </step>
+  </protocol_steps>
+
+  <notes>
+    <note>The pDNA volume is fixed at 13.25 uL for a 500ng load; ensure dH2O is adjusted if template concentration varies.</note>
+    <note>Steps 3 and 4 are specifically for Master Mix workflows.</note>
+    <note>The 5-second thermocycler step is a physical check, not a thermal incubation.</note>
+  </notes>
+</pcr_protocol>

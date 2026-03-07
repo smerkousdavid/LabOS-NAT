@@ -205,3 +205,23 @@ All three stacks on one machine. Services find each other via Docker network `la
 - The desktop app (`labos-runtime`) has zero secrets -- it only points to endpoints.
 - WebSocket and HTTP connections are unencrypted by default. For production, use a reverse proxy with TLS.
 - The `ws_protocol.py` file is shared between labos-nat and labos-runtime. Keep both copies in sync when modifying the protocol.
+
+## Session Protocol Registry
+
+Runtime-pushed protocols are stored in `ProtocolState.session_protocols` (per-session dict) instead of writing to the `protocols/` directory. The `list_available_protocols()` and `find_available_protocol()` helpers in `store.py` merge disk-backed and session-scoped protocols for a unified view.
+
+## Step Detail and Image Flow
+
+Each `StepDetail` carries `image_url`, `image_base64`, and `image_query` fields. During protocol compaction, bracketed URLs are extracted from step text. On step transitions, `ensure_current_step_image_loaded()` fetches and caches images. The UI panel renders images between the step window and detail text, with dynamic windowing that collapses neighboring steps when the current step text is long.
+
+## Error Interjection Flow
+
+When `interject_error: false` (default), VLM-detected errors are shown inline on the step panel without TTS overlay. STELLA's `_in_error_state` is cleared on any manual navigation so the monitor loop doesn't retain error state after the user moves on.
+
+## Tool Priority Chain
+
+System prompts enforce: protocol context -> practice_guidance -> query_stella (visual only) -> web_search (fallback). Navigation commands always take absolute priority regardless of error or monitoring state.
+
+## Available Commands Overlay
+
+The `render_available_commands()` function displays a categorized command reference on the AR panel. When a protocol is active, it includes a "back to protocol" return hint.
