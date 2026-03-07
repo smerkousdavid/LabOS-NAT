@@ -1,0 +1,62 @@
+<stella_orientation_protocol>
+  <title>Meet STELLA!</title>
+  <goal>To master the core voice-assisted commands and interactive features of the STELLA LabOS interface through a hands-on guided orientation.</goal>
+
+  <materials>
+    <item>STELLA Voice Interface (Active)</item>
+    <item>Laboratory Workstation</item>
+    <item>A curious mind!</item>
+  </materials>
+
+  <protocol_steps>
+    <step id="1" title="Activating My Voice">
+      Hi there! I'm STELLA, your cheerful lab assistant! To get my attention, just say "STELLA" at the beginning or the end of your sentence. Give it a try now to say hello!
+When you finish a task, just tell me "STELLA, Next" to move forward. It’s the easiest way to keep our workflow moving. Try it right now!
+      
+    </step>
+
+    <step id="2" title="Navigation: Moving Backwards">
+      Oops, did we miss something? No worries! Just say "STELLA, Go back a step" or "STELLA, Previous step" to return to the previous instruction.
+    </step>
+
+    <step id="3" title="Navigation: Jump to Step">
+      I can teleport you anywhere in the protocol! Just say "STELLA, Go to step [number]." For practice, let's jump ahead—tell me "STELLA, Go to step 6."
+      
+    </step>
+
+    <step id="4" title="Object Recognition &amp; Explanations">
+      I love sharing knowledge! If you see something in the lab you don't recognize, just ask. Try saying "STELLA, show me a pipette" or "STELLA, what is a cat?" When you're done learning, say "STELLA, Next."
+      
+    </step>
+
+    <step id="5" title="Your On-Call Calculator">
+      I’m great with numbers! You can use me as a calculator by saying "STELLA, multiply 5 by 5" or "STELLA, what is 2 plus 2 minus 4?" Say "STELLA, Next" to proceed when you're ready!
+      
+    </step>
+
+    <step id="6" title="Logging Bench Data">
+      Let's keep your records tidy! I can log data for you instantly. Try saying "STELLA, log tube 1 as 5 grams." You can name an item anything you like, just start with "log!"
+      
+    </step>
+
+    <step id="7" title="Retrieving Logged Data">
+      Now, let's see if I remembered! Ask me "STELLA, what is the weight of tube 1?" to check your data. Say "STELLA, Next" to continue!
+      
+    </step>
+
+    <step id="8" title="Ending the Session">
+      You did it! You’ve mastered the basics. If you ever need to finish early, just say "STELLA, Stop protocol." I’ll see you around the lab!
+      
+    </step>
+  </protocol_steps>
+
+  <common_errors>
+    <error>Forgetting the Wake Word: I won't know you're talking to me unless you say "STELLA!" </error>
+    <error>Vague Log Names: Try to use specific names for tubes so I don't get them mixed up later.</error>
+  </common_errors>
+
+  <notes>
+    <note>I am always here to help—if you get stuck, just ask me for help!</note>
+    <note>Remember to speak clearly so I can hear you over the hum of the centrifuge.</note>
+  </notes>
+</stella_orientation_protocol>

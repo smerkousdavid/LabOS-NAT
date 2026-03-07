@@ -245,15 +245,13 @@ class LabOSLiveClient:
             except Exception as exc:
                 logger.error(f"[LabOSLive] start_protocol_by_text handler failed: {exc}")
         else:
-            from tools.protocols.store import get_protocol_store
-            store = get_protocol_store()
-            steps = [line.strip() for line in text.strip().split("\n") if line.strip()]
-            store.add_protocol({
-                "pretty_name": name,
-                "steps": steps,
-                "raw": text,
-            })
-            logger.info(f"[LabOSLive] Added protocol '{name}' with {len(steps)} steps from web")
+            from tools.protocols.state import get_protocol_state
+            from tools.protocols.store import build_protocol_entry, _parse_steps
+            state = get_protocol_state(self._session_id)
+            steps = _parse_steps(text)
+            safe_key = name.lower().replace(" ", "_")
+            state.session_protocols[safe_key] = build_protocol_entry(name, steps, text)
+            logger.info(f"[LabOSLive] Stored session protocol '{name}' with {len(steps)} steps")
 
     async def _handle_clear_session(self, msg: dict):
         """Handle a web-initiated session clear/stop."""
@@ -270,7 +268,7 @@ class LabOSLiveClient:
         try:
             from tools.protocols.state import get_protocol_state
             state = get_protocol_state(self._session_id)
-            state.reset()
+            state.reset(clear_session_protocols=True)
         except Exception:
             pass
 

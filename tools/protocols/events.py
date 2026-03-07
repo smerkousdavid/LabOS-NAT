@@ -105,9 +105,10 @@ async def on_step_event(event):
 
     # Render
     if state_val == "ERROR":
+        from config import should_interject_error
         if viture_ui.get_display_mode() == "overlay":
             logger.debug("[Events] Error suppressed -- overlay mode active")
-        else:
+        elif should_interject_error():
             await viture_ui.render_error(state, event.error_detail or event.message)
             now = time.time()
             if event.step_num != _last_error_tts_step or (now - _last_error_tts_time) > _ERROR_TTS_COOLDOWN:
@@ -117,12 +118,19 @@ async def on_step_event(event):
                 await viture_tts.push_tts(tts_message)
             else:
                 logger.debug(f"[Events] Suppressed duplicate error TTS for step {event.step_num}")
+        else:
+            await viture_ui.render_step_panel(state)
         await _emit_labos_protocol_error(state.protocol_name, event.error_detail or event.message)
 
     elif state_val == "COMPLETED" and state.mode == "completed":
         await complete_protocol_run(state)
 
     elif state_val == "STARTED":
+        try:
+            from tools.protocols.tools import ensure_current_step_image_loaded
+            await ensure_current_step_image_loaded(state)
+        except Exception:
+            pass
         await viture_ui.render_step_panel(state)
         tts_msg = f"Step {event.step_num}: {event.step_text}"
         await viture_tts.push_tts(tts_msg)

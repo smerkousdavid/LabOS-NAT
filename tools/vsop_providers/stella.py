@@ -32,30 +32,40 @@ from frame_source import create_frame_source
 # ---------------------------------------------------------------------------
 
 MONITORING_PROMPT = """\
-You are STELLA, a lab protocol monitor. Your ONLY job: detect errors and verify step completion. You do NOT advance the protocol.
+You are STELLA, a lab protocol monitor. Your ONLY job: detect concrete protocol execution mistakes and verify step completion. You do NOT advance the protocol.
 
 Protocol: {protocol_name} ({total_steps} steps)
 {all_steps_block}
 
 Current step ({current_step_num}/{total_steps}): {current_step_text}
 Description: {step_description}
-Known mistakes: {common_errors_block}
+Known mistakes to watch for: {common_errors_block}
 Context: {protocol_context_block}
 
 {recent_context}
 
 Classify as EXACTLY one of:
 
-STATUS: SAME -- User is working on current step. No error detected.
-STATUS: STEP_COMPLETE -- Current step outcome is clearly achieved in the final frames. User must still say "next step" to advance.
-STATUS: ERROR -- User made a clear mistake: wrong reagent, skipped sub-step, wrong equipment, safety violation. Do NOT flag errors for: walking away, talking, writing, or phone use.
+STATUS: SAME -- Default. The user is working, pausing, idle, or not yet started. No protocol deviation observed.
+STATUS: STEP_COMPLETE -- The required outcome of the current step is clearly achieved in the final frames. User must still say "next step" to advance.
+STATUS: ERROR -- You have VISUAL EVIDENCE of a concrete protocol mistake DURING the step execution. Examples: wrong reagent picked up, incorrect number of tubes/wells handled (e.g. pipetted 3 wells when step says 5), skipped a required sub-step that is now impossible to redo, used wrong equipment.
+
+IMPORTANT: You are watching through AR glasses mounted on ONE person's head. Focus ONLY on what the wearer's hands are doing. Ignore other people in the room -- their actions are irrelevant.
+
+CRITICAL -- these are NOT errors, always return SAME:
+- User is on their phone, distracted, talking, writing, or looking elsewhere.
+- User has not started the step yet or is pausing between actions.
+- User walked away or is in another area.
+- Another person in view is doing something unrelated.
+- Insufficient visual evidence to confirm a mistake happened.
+When in doubt, return SAME. Only flag ERROR when you can describe exactly what wrong action the wearer performed.
 
 {frame_count} frames from last {window_secs}s (oldest first). Final frames = current state.
 
 Reply EXACTLY (3 lines, no extra text):
 STATUS: <SAME|STEP_COMPLETE|ERROR>
 DETAIL: <2 sentences max: what you see>
-ERROR: <if ERROR, describe mistake. Otherwise: none>\
+ERROR: <if ERROR, describe the specific protocol mistake with expected vs actual. Otherwise: none>\
 """
 
 GENERATE_PROTOCOL_PROMPT = """\
@@ -219,6 +229,11 @@ REASON: <one sentence>\
 
 # Native ring-buffer passthrough values in runtime_connector `/frames`.
 # Using these avoids decode/re-encode in the API handler.
+IMAGE_VALIDATION_PROMPT = """\
+Look at this image. Does it accurately depict: "{description}"?
+Reply with EXACTLY one word: YES or NO.\
+"""
+
 _RC_NATIVE_MAX_SIZE = 800
 _RC_NATIVE_JPEG_QUALITY = 70
 
@@ -419,22 +434,35 @@ class StellaVSOPProvider(VSOPProvider):
     # ------------------------------------------------------------------
 
     async def manual_advance(self) -> str:
+        self._in_error_state = False
         self._step_complete_announced = False
         self._last_pushed_status = ""
         self._last_pushed_detail = ""
         return await super().manual_advance()
 
     async def manual_retreat(self) -> str:
+        self._in_error_state = False
         self._step_complete_announced = False
         self._last_pushed_status = ""
         self._last_pushed_detail = ""
         return await super().manual_retreat()
 
     async def manual_goto(self, step_num: int) -> str:
+        self._in_error_state = False
         self._step_complete_announced = False
         self._last_pushed_status = ""
         self._last_pushed_detail = ""
         return await super().manual_goto(step_num)
+
+    async def validate_external_image(self, image_b64: str, description: str) -> bool:
+        """Use STELLA VLM to check if an image matches a description."""
+        try:
+            prompt = IMAGE_VALIDATION_PROMPT.format(description=description)
+            result = await self._call_stella(prompt, [image_b64])
+            return "YES" in result.upper()
+        except Exception as exc:
+            logger.debug(f"[STELLA] Image validation failed: {exc}")
+            return True
 
     # ------------------------------------------------------------------
     # Ad-hoc questions
@@ -856,6 +884,13 @@ class StellaVSOPProvider(VSOPProvider):
             return
 
         if status == "error":
+            from tools.vsop_providers import is_non_protocol_error
+            if is_non_protocol_error(error_msg or detail):
+                self._stella_log.debug(
+                    f"ERROR suppressed (non-protocol: distraction/idle) step={self._current_step}: {error_msg or detail}"
+                )
+                return
+
             if not self._in_error_state:
                 self._pending_error_count += 1
                 if self._pending_error_count < self._ERROR_CONFIRM_POLLS:

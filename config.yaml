@@ -15,6 +15,8 @@ nat:
 
   forward_audio: false
 
+  interject_error: false  # true = overlay + TTS on VLM errors; false = inline on step panel
+
   session:
     context_window_tokens: 6000
     max_turns: 10
@@ -24,6 +26,7 @@ nat:
 
   vsop:
     provider: gemini_custom_manage
+    protocols_dir: protocols
     polling_interval: 5
     multi_frame:
       count: 5
@@ -37,13 +40,13 @@ nat:
     model: gemini-3.1-flash-lite-preview
     api_key: "${GOOGLE_API_KEY}"
     monitoring_frames: 20                 # frames per monitoring poll
-    monitoring_window_seconds: 20         # seconds of video to sample per poll
+    monitoring_window_seconds: 30         # seconds of video to sample per poll
     monitoring_interval: 10               # seconds between monitoring polls
     chat_frames: 5                        # frames attached to user chat messages
 
   labos_live:
-    enabled: true                        # master switch -- activated by QR code payload
-    initial_qr_code: true                # show QR scanning prompt on XR startup
+    enabled: false                        # master switch -- activated by QR code payload
+    initial_qr_code: false                # show QR scanning prompt on XR startup
     website_base_url: "ws://100.100.203.84"                  # fallback URL if QR ws_endpoint fails (e.g. "wss://labos.example.com")
 
   tools:

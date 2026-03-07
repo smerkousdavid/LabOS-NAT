@@ -71,6 +71,35 @@ Connect at `ws://<host>:8002/ws?session_id=<id>`
 
 Protocol management, STELLA VLM monitoring, web search, code execution, datetime, display/TTS, and history summarization. Toggle tools in `config.yaml` under `nat.tools`.
 
+## New Features
+
+### Session-Scoped Protocols
+Runtime-pushed protocols are stored in per-session memory (not written to disk). They are merged with disk-backed protocols for listing and startup, and cleared on disconnect or session reset.
+
+### Non-Blocking Error Handling
+Configure `interject_error: false` in `config.yaml` to keep VLM-detected errors inline on the step panel instead of overlaying/interrupting with TTS. Navigation commands always take priority regardless of error state.
+
+### Per-Step Image Support
+Protocol steps can include embedded image URLs in brackets (e.g., `[http://example.com/image.jpg]`). Images are fetched, cached as base64, and displayed at the top of the step panel. The panel dynamically adjusts its step window to prevent images from being cut off by long step text.
+
+### Image Search with VLM Validation
+The `image_search` tool now checks for explicit step images first, then searches the web. Candidate images are validated through the active VLM provider before display.
+
+### Practice Guidance
+Users can ask about lab equipment and techniques (e.g., "how do I use a pipette?"). The `practice_guidance` tool loads structured data from `data/wetlab-practices.json` and adapts parameters to the current protocol context.
+
+### Protocol Discussion Mode
+Users can design temporary protocols through conversation. The `start_protocol_discussion` tool enters discussion mode where users can describe, refine, and then run a custom protocol without saving it to disk.
+
+### Available Commands
+The `available_commands` tool displays all voice commands on the AR panel. During an active protocol, it includes a "back to protocol" hint.
+
+### Fast-Path Navigation
+Simple navigation commands ("next step", "stella next", "move on") are detected before the LLM and executed directly, reducing latency. Wake-word prefixes are stripped automatically.
+
+### Reset Session
+Users can say "reset", "go home", or "main menu" to clear all state and return to the greeting screen.
+
 ## HTTP Endpoints
 
 | Method | Path | Purpose |

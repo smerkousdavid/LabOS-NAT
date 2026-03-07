@@ -16,7 +16,11 @@ from loguru import logger
 from pydantic import Field
 
 from tools.protocols.state import ProtocolState, StepDetail, get_protocol_state
-from tools.protocols.store import get_protocol_store
+from tools.protocols.store import (
+    find_available_protocol,
+    get_protocol_store,
+    list_available_protocols,
+)
 from tools.vsop_providers import get_vsop_provider, init_vsop_provider
 from tools.display import ui as viture_ui
 from context.manager import get_context_manager
@@ -37,11 +41,14 @@ Rules:
 - Keep each description under 180 characters when possible.
 - Use direct action language.
 - Do NOT add generic filler like "make sure your workspace is clean" unless required by the specific step.
+- Do NOT invent or fabricate information not present in the step text. Only rephrase what is given.
+- Do NOT add safety steps, cleanup steps, or extra actions not in the original step.
 - Prefer concrete specifics (what to pick up, what to record, where to place).
 - Return strict JSON only (ASCII), no markdown, no code fences.
 - Escape any double quotes inside values.
-- Keep each object shape EXACTLY: {"description": "...", "common_errors": ["..."]}.
+- Keep each object shape EXACTLY: {{"description": "...", "common_errors": ["..."]}}.
 - Do not include trailing commas, comments, or extra keys.
+- Do not include URLs in descriptions.
 
 Examples:
 - Step text: "Weight 5 PCR tubes"
@@ -81,7 +88,10 @@ Rules:
 - Preserve order and critical constraints.
 - Exclude decorative or repeated prose.
 - Keep 3-20 steps total.
+- Do NOT invent an "Introduction" or "Welcome" first step that does not exist in the source. Start with the first real action.
 - The source may use XML/HTML tags -- extract only the actionable steps and context, never include markup tags in the output.
+- CRITICAL: Do NOT invent, add, or fabricate steps that are not in the source protocol. Only rephrase what exists. If the source has 12 steps, output exactly 12 steps. Never add safety steps, cleanup steps, or any content not present in the original.
+- If a step contains a URL in brackets like [https://...], strip it from both "text" and "detail". Do not include URLs in the output.
 
 Example step:
 {{
@@ -118,6 +128,89 @@ _ROBOT_NL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BRACKET_URL_RE = re.compile(r"\s*\[(https?://[^\]\s]+)\]\s*")
+_PAREN_SOURCE_RE = re.compile(r"\s*\((?:Source:\s*)?(https?://\S+?)\)\s*")
+_IMAGE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp|svg|bmp)", re.IGNORECASE)
+
+
+def _extract_image_url(text: str) -> tuple[str, str]:
+    """Extract first image URL from text, return (cleaned_text, image_url).
+
+    Handles:
+      - [https://example.com/image.jpg]  (bracketed URLs)
+      - [https://th.bing.com/th/id/R.abc?rik=...&r=0]  (bracketed URLs without extension)
+      - (Source: https://example.com/img.png)  (LLM-rewritten source links)
+    """
+    m = _BRACKET_URL_RE.search(text)
+    if m:
+        url = m.group(1)
+        cleaned = text[:m.start()] + text[m.end():]
+        return cleaned.strip(), url
+    m = _PAREN_SOURCE_RE.search(text)
+    if m:
+        url = m.group(1)
+        cleaned = text[:m.start()] + text[m.end():]
+        return cleaned.strip(), url
+    return text, ""
+
+
+def _build_step_payload(raw) -> dict:
+    """Normalize a step (str or dict) into {text, detail, image_url, image_query}."""
+    if isinstance(raw, dict):
+        text = str(raw.get("text", "")).strip()
+        detail = str(raw.get("detail", "")).strip()
+        image_url = str(raw.get("image_url", "")).strip()
+        image_query = str(raw.get("image_query", "")).strip()
+    else:
+        text = str(raw).strip()
+        detail = text
+        image_url = ""
+        image_query = ""
+
+    if not image_url:
+        text, image_url = _extract_image_url(text)
+    if not image_url:
+        detail, image_url = _extract_image_url(detail)
+
+    words = text.split()
+    if len(words) > 12:
+        text = " ".join(words[:10]) + "..."
+        if not detail or detail == text:
+            detail = " ".join(words)
+
+    return {"text": text, "detail": detail, "image_url": image_url, "image_query": image_query}
+
+
+def _looks_like_intro_title(text: str) -> bool:
+    t = text.strip().lower()
+    return t.startswith(("introduction", "welcome", "overview")) and len(t) < 80
+
+
+def _strip_intro_prefix(text: str) -> str:
+    for prefix in ("Introduction:", "Welcome:", "Overview:"):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+def _remove_synthetic_intro_step(steps: list) -> list:
+    """If the first step looks like a synthetic intro, rewrite or remove it."""
+    if not steps:
+        return steps
+    first = steps[0]
+    if isinstance(first, dict):
+        t = first.get("text", "")
+    else:
+        t = str(first)
+    if _looks_like_intro_title(t):
+        if isinstance(first, dict):
+            first["text"] = _strip_intro_prefix(first["text"])
+            if first.get("detail"):
+                first["detail"] = _strip_intro_prefix(first["detail"])
+        else:
+            steps[0] = _strip_intro_prefix(t)
+    return steps
+
 
 def _extract_robot_annotation(step_text: str) -> tuple:
     """Extract ``[robot:name]`` or ``(run robot protocol "name")`` from step text.
@@ -130,6 +223,49 @@ def _extract_robot_annotation(step_text: str) -> tuple:
             clean = step_text[:m.start()] + step_text[m.end():]
             return clean.strip(), m.group(1).strip()
     return step_text, None
+
+
+def _sync_step_statuses(state) -> None:
+    """Synchronize each StepDetail.status with state.current_step and completed_steps."""
+    for i, step in enumerate(state.steps):
+        num = i + 1
+        if num in state.completed_steps:
+            step.status = "completed"
+            step.error_detail = None
+        elif num == state.current_step:
+            step.status = "in_progress"
+        else:
+            step.status = "pending"
+            step.error_detail = None
+
+
+async def ensure_current_step_image_loaded(state) -> None:
+    """Fetch and cache base64 for the current step's image_url if needed."""
+    detail = state.current_step_detail()
+    if detail is None:
+        return
+    if detail.image_base64:
+        return
+    url = (detail.image_url or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        return
+    try:
+        import base64
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200 and len(resp.content) > 100:
+                b64 = base64.b64encode(resp.content).decode("ascii")
+                if len(b64) > 200:
+                    detail.image_base64 = b64
+                    logger.debug(f"[Image] Loaded {len(b64)} chars for step {state.current_step}")
+                else:
+                    logger.debug(f"[Image] Fetched image too small for step {state.current_step}")
+            else:
+                logger.debug(f"[Image] Fetch failed ({resp.status_code}) for: {url[:80]}")
+    except Exception as exc:
+        logger.debug(f"[Image] Failed to load image for step {state.current_step}: {exc}")
+        detail.image_base64 = ""
 
 
 ERROR_COOLDOWN_SECONDS = 5.0
@@ -418,7 +554,7 @@ async def _enrich_steps_via_llm(protocol_name: str, step_texts: list) -> list:
         if parsed is not None:
             return _normalize_entries(parsed)
 
-        logger.warning("Step enrichment parse failed; attempting JSON repair pass.")
+        logger.debug("Step enrichment parse failed; attempting JSON repair pass.")
         repaired_resp = await loop.run_in_executor(None, lambda: _repair_json_sync(raw[:6000]))
         repaired_raw = (repaired_resp.choices[0].message.content or "").strip()
         repaired = _parse_from_candidates(repaired_raw)
@@ -427,6 +563,7 @@ async def _enrich_steps_via_llm(protocol_name: str, step_texts: list) -> list:
     except Exception as exc:
         logger.warning(f"Step enrichment LLM call failed: {exc}")
 
+    logger.warning("Step enrichment failed after parse and repair; using empty descriptions.")
     return _defaults()
 
 
@@ -463,6 +600,22 @@ def _build_protocol_context_text(context: dict) -> str:
     return text
 
 
+def _extract_balanced_object(text: str) -> str | None:
+    """Extract the first balanced {...} from text using brace counting."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallback_steps: list) -> dict:
     """Compile source protocol text into compact steps + protocol-aware context."""
     import asyncio
@@ -495,9 +648,9 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, _call_sync)
         raw_reply = (response.choices[0].message.content or "").strip()
-        match = re.search(r"\{.*\}", raw_reply, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
+        json_str = _extract_balanced_object(raw_reply)
+        if json_str:
+            data = json.loads(json_str)
             if isinstance(data, dict):
                 steps = data.get("steps")
                 if isinstance(steps, list):
@@ -512,6 +665,7 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
                             cleaned.append(s.strip())
                     if cleaned:
                         compact_steps = cleaned[:20]
+                    compact_steps = _remove_synthetic_intro_step(compact_steps)
                 context_text = _build_protocol_context_text(data.get("context") or {})
     except Exception as exc:
         logger.warning(f"Protocol compaction LLM call failed: {exc}")
@@ -522,25 +676,15 @@ async def _compact_protocol_via_llm(protocol_name: str, raw_protocol: str, fallb
     return {"steps": compact_steps, "context_text": context_text}
 
 
-def _quick_compact_steps(step_texts: list[str]) -> list[tuple[str, str]]:
-    """Return list of (short_label, full_detail) tuples.
-
-    short_label: first ~60 chars (sentence-boundary aware) for TTS/step list.
-    full_detail: the complete original text for the description panel.
-    """
+def _quick_compact_steps(step_texts: list[str]) -> list[dict]:
+    """Return list of step payload dicts with text, detail, image_url, image_query."""
     compact = []
     for step in step_texts:
         full = " ".join(str(step).split()).strip()
         if not full:
             continue
-        if len(full) <= 60:
-            compact.append((full, full))
-        else:
-            cut = full[:60]
-            last_space = cut.rfind(" ")
-            if last_space > 30:
-                cut = cut[:last_space]
-            compact.append((cut.rstrip(",;:") + "...", full))
+        payload = _build_step_payload(full)
+        compact.append(payload)
     return compact[:20]
 
 
@@ -728,16 +872,29 @@ async def _refine_steps_background(
         if not state.is_active or state.protocol_name != protocol_name:
             return
 
-        # Update step texts and pre-populate descriptions from compaction detail
+        # Update step texts and pre-populate descriptions from compaction detail.
+        # Re-extract image URLs from LLM output and preserve existing ones.
+        cleaned_provider_texts = []
         for i, step in enumerate(state.steps):
-            if i < len(refined_texts) and refined_texts[i]:
-                step.text = refined_texts[i]
-            if i < len(compacted_details) and compacted_details[i]:
-                step.description = compacted_details[i]
+            new_text = refined_texts[i] if i < len(refined_texts) else ""
+            new_detail = compacted_details[i] if i < len(compacted_details) else ""
 
-        # Also update the provider's internal step list so TTS uses the full text
-        if hasattr(provider, "_steps") and refined_texts:
-            provider._steps = refined_texts[:len(provider._steps)]
+            if new_text:
+                new_text, found_url = _extract_image_url(new_text)
+                if found_url and not step.image_url:
+                    step.image_url = found_url
+                step.text = new_text
+            if new_detail:
+                new_detail, found_url = _extract_image_url(new_detail)
+                if found_url and not step.image_url:
+                    step.image_url = found_url
+                step.description = new_detail
+
+            cleaned_provider_texts.append(step.text)
+
+        # Also update the provider's internal step list so TTS uses cleaned text
+        if hasattr(provider, "_steps") and cleaned_provider_texts:
+            provider._steps = cleaned_provider_texts[:len(provider._steps)]
 
         stable_step_texts = [s.text for s in state.steps] or list(fallback_steps or [])
         enrichments = await _enrich_steps_via_llm(protocol_name, stable_step_texts)
@@ -762,6 +919,7 @@ async def _refine_steps_background(
             )
 
         if state.is_active:
+            await ensure_current_step_image_loaded(state)
             await viture_ui.render_step_panel(state)
     except Exception as exc:
         logger.warning(f"Background protocol refinement failed: {exc}")
@@ -871,13 +1029,13 @@ async def list_protocols() -> str:
     and returns the list for voice output. Use when user says 'list protocols',
     'show protocols', 'what can I run', or 'what experiments are available'."""
     store = get_protocol_store()
-    protocols = store.list_protocols()
+    state = get_protocol_state()
+    protocols = list_available_protocols(store, state)
     if not protocols:
         return "No protocols are currently available in the database."
 
-    await viture_ui.render_protocol_list(store)
+    await viture_ui.render_protocol_list(store, state=state)
 
-    state = get_protocol_state()
     state.mode = "listing"
     get_context_manager().set_context("protocol_listing")
 
@@ -912,12 +1070,12 @@ async def start_protocol(
         await provider.stop()
         state.reset()
 
-    proto = store.find_protocol(protocol_name)
+    proto = find_available_protocol(protocol_name, store, state)
 
     if not proto:
         try:
             idx = int(protocol_name)
-            protocols = store.list_protocols()
+            protocols = list_available_protocols(store, state)
             if 1 <= idx <= len(protocols):
                 proto = protocols[idx - 1]
         except (ValueError, TypeError):
@@ -927,14 +1085,20 @@ async def start_protocol(
         fallback_steps = list(proto.get("steps", []))
         compacted_pairs = _quick_compact_steps(fallback_steps)
         if not compacted_pairs:
-            compacted_pairs = [("Prepare protocol according to source document.", "Prepare protocol according to source document.")]
+            compacted_pairs = [{"text": "Prepare protocol according to source document.", "detail": "Prepare protocol according to source document.", "image_url": "", "image_query": ""}]
 
-        step_texts = [short for short, _full in compacted_pairs]
+        step_texts = [p["text"] for p in compacted_pairs]
 
         step_details = []
-        for short_label, full_detail in compacted_pairs:
-            clean, robot_proto = _extract_robot_annotation(short_label)
-            step_details.append(StepDetail(text=clean, description=full_detail, robot_protocol=robot_proto))
+        for p in compacted_pairs:
+            clean, robot_proto = _extract_robot_annotation(p["text"])
+            step_details.append(StepDetail(
+                text=clean,
+                description=p["detail"],
+                robot_protocol=robot_proto,
+                image_url=p.get("image_url", ""),
+                image_query=p.get("image_query", ""),
+            ))
 
         state.is_active = True
         state.mode = "running"
@@ -958,6 +1122,7 @@ async def start_protocol(
             protocol_context=state.extra_context,
         )
 
+        await ensure_current_step_image_loaded(state)
         await viture_ui.render_step_panel(state)
 
         await _emit_labos_protocol_start(state)
@@ -1043,7 +1208,9 @@ async def next_step() -> str:
     state = get_protocol_state()
     state.current_step = provider._current_step
     state.completed_steps = list(provider._completed_steps)
+    _sync_step_statuses(state)
     if state.is_active:
+        await ensure_current_step_image_loaded(state)
         await viture_ui.render_step_panel(state)
     return result
 
@@ -1061,6 +1228,8 @@ async def previous_step() -> str:
     state = get_protocol_state()
     state.current_step = provider._current_step
     state.completed_steps = list(provider._completed_steps)
+    _sync_step_statuses(state)
+    await ensure_current_step_image_loaded(state)
     await viture_ui.render_step_panel(state)
     return result
 
@@ -1079,6 +1248,8 @@ async def go_to_step(
     state = get_protocol_state()
     state.current_step = provider._current_step
     state.completed_steps = list(provider._completed_steps)
+    _sync_step_statuses(state)
+    await ensure_current_step_image_loaded(state)
     await viture_ui.render_step_panel(state)
     return result
 
@@ -1096,6 +1267,8 @@ async def restart_protocol() -> str:
     state.current_step = 1
     state.completed_steps = []
     state.error_history = []
+    _sync_step_statuses(state)
+    await ensure_current_step_image_loaded(state)
     await viture_ui.render_step_panel(state)
     return result
 
@@ -1117,12 +1290,160 @@ async def clear_error() -> str:
     state.error_display_until = 0.0
     state.error_cooldown_until = time.time() + ERROR_COOLDOWN_SECONDS
 
+    await ensure_current_step_image_loaded(state)
     await viture_ui.render_step_panel(state)
 
     step_text = ""
     if 1 <= state.current_step <= len(state.steps):
         step_text = state.steps[state.current_step - 1].text
     return f"Error cleared. Continuing with step {state.current_step}: {step_text}"
+
+
+@function_tool
+@toggle_dashboard("reset_session")
+async def reset_session() -> str:
+    """Reset the session to the main menu. Clears protocol state, session
+    protocols, and context. Use when user says 'reset', 'go home',
+    'main menu', or 'start over'."""
+    provider = get_vsop_provider()
+    state = get_protocol_state()
+
+    if provider is not None and provider.is_active:
+        try:
+            await provider.stop()
+        except Exception:
+            pass
+
+    state.reset(clear_session_protocols=True)
+    get_context_manager().set_context("main_menu")
+
+    try:
+        await viture_ui.render_greeting()
+    except Exception:
+        pass
+
+    return "Session reset. Back at main menu."
+
+
+@function_tool
+@toggle_dashboard("available_commands")
+async def available_commands() -> str:
+    """Show available commands on the AR display. Use when user asks
+    'what can I do?', 'what can you do?', 'help', or 'commands'."""
+    try:
+        from tools.display.ui import render_available_commands
+        await render_available_commands()
+    except Exception:
+        pass
+    return "I've displayed the available commands."
+
+
+@function_tool
+@toggle_dashboard("practice_guidance")
+async def practice_guidance(
+    query: Annotated[str, Field(description="Lab equipment or technique name, e.g. 'pipette', 'centrifuge', 'vortexer'")]
+) -> str:
+    """Look up guidance for a lab tool or technique and display on AR.
+    Adapts parameters to the current protocol context (e.g. RPM, volumes).
+    Use when user asks 'how do I use a pipette?' or similar."""
+    from tools.protocols.practices_store import get_practice_steps, list_practices
+
+    result = get_practice_steps(query)
+    if not result.get("found"):
+        available = list_practices()
+        if available:
+            return f"No guidance found for '{query}'. Available: {', '.join(available[:8])}."
+        return f"No guidance data available for '{query}'. Try asking me directly."
+
+    state = get_protocol_state()
+    context_hint = ""
+    if state.is_active and state.current_step_detail():
+        step_text = state.current_step_detail().description or state.current_step_detail().text
+        context_hint = f"\nCurrent protocol step context: {step_text[:200]}"
+
+    steps_text = ""
+    for i, step in enumerate(result.get("steps", []), 1):
+        if isinstance(step, dict):
+            steps_text += f"\n{i}. {step.get('instruction', step.get('text', str(step)))}"
+        else:
+            steps_text += f"\n{i}. {step}"
+
+    safety = result.get("safety_notes", "")
+    ppe = ", ".join(result.get("ppe", []))
+
+    lines = [
+        f'<size=22><b>{result["name"]}</b></size><br>',
+        f'<size=16><color=#D9D8FF>{result.get("goal", "")}</color></size><br><br>',
+    ]
+    if steps_text:
+        lines.append(f'<size=16><color=#DDDDDD>{steps_text.strip()}</color></size><br><br>')
+    if safety:
+        lines.append(f'<size=14><color=#FFB347>Safety: {safety}</color></size><br>')
+    if ppe:
+        lines.append(f'<size=14><color=#FFB347>PPE: {ppe}</color></size><br>')
+    if context_hint:
+        lines.append(f'<br><size=14><color=#59D2FF>Adapted to current step.{context_hint[:100]}</color></size>')
+
+    try:
+        await viture_ui.render_rich_panel([{"type": "rich-text", "content": "".join(lines)}])
+    except Exception:
+        pass
+
+    spoken = f"Here's guidance on {result['name']}."
+    if result.get("goal"):
+        spoken += f" {result['goal'][:80]}"
+    return spoken
+
+
+@function_tool
+@toggle_dashboard("start_protocol_discussion")
+async def start_protocol_discussion() -> str:
+    """Begin a protocol discussion session where the user can describe and
+    refine a temporary protocol before running it. Use when user says
+    'let's create a protocol' or 'discuss a protocol'."""
+    state = get_protocol_state()
+    if state.is_active:
+        return "A protocol is already running. Stop it first."
+
+    state.mode = "discussion"
+    get_context_manager().set_context("protocol_discussion")
+    return "Protocol discussion started. Describe the steps you'd like to include."
+
+
+@function_tool
+@toggle_dashboard("update_protocol_discussion")
+async def update_protocol_discussion(
+    text: Annotated[str, Field(description="Updated protocol text or step list")]
+) -> str:
+    """Update the draft protocol being discussed. Call when user provides
+    or modifies protocol steps during discussion mode."""
+    state = get_protocol_state()
+    state.extra_context = text
+    return f"Draft updated with {len(text)} characters. Say 'run this' when ready."
+
+
+@function_tool
+@toggle_dashboard("run_discussed_protocol")
+async def run_discussed_protocol(
+    name: Annotated[str, Field(description="Name for the protocol")] = "Custom Protocol"
+) -> str:
+    """Compile and start the discussed protocol from the draft text.
+    Use when user says 'run this', 'start it', 'let's go'."""
+    state = get_protocol_state()
+    draft = state.extra_context.strip()
+    if not draft:
+        return "No draft protocol text. Describe the steps first."
+
+    from tools.protocols.store import build_protocol_entry, _parse_steps
+    steps = _parse_steps(draft)
+    if not steps:
+        return "Could not parse steps from the draft. Try listing them as numbered items."
+
+    safe_key = name.lower().replace(" ", "_")
+    state.session_protocols[safe_key] = build_protocol_entry(name, steps, draft)
+
+    result = await start_protocol(protocol_name=name)
+    return result
 
 
 @function_tool
