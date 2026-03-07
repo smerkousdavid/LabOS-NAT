@@ -479,8 +479,44 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
             return raw
 
     is_compact = payload.get("t") == "ll"
+    # Detect pairing code: bridge.py sends {"t":"ll","raw":"AB3X7Z"} for non-JSON QR;
+    # we also accept {"t":"ll","c":"AB3X7Z"} as an explicit pairing-code marker.
+    _raw_code = str(payload.get("c") or payload.get("raw") or "").strip().upper()
+    has_pairing_code = is_compact and len(_raw_code) == 6 and _raw_code.isalnum()
     join_error: Optional[str] = None
-    if is_compact:
+    labos_session_id = ""
+    ws_endpoint = ""
+    publish_rtsp = ""
+    token = ""
+
+    if has_pairing_code:
+        # Pairing-code flow: QR contains only a 6-char code.
+        # Call /sessions/lookup to get all connection details from the backend.
+        pairing_code = _raw_code
+        from config import get_labos_live_config
+        api_base = get_labos_live_config().get("api_base", "http://backend:18800").rstrip("/")
+        lookup_url = f"{api_base}/api/v2/live/sessions/lookup"
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=8.0) as client_http:
+                response = await client_http.post(lookup_url, json={"code": pairing_code})
+            if response.status_code >= 400:
+                join_error = f"Live lookup failed ({response.status_code})"
+                logger.warning(
+                    f"[WS] Live lookup failed ({response.status_code}) for {session_id[:8]}: {response.text[:200]}"
+                )
+            else:
+                data = response.json()
+                labos_session_id = data.get("session_id", "")
+                ws_endpoint = data.get("ws_endpoint", "")
+                publish_rtsp = data.get("publish_rtsp", "")
+                logger.info(f"[WS] Lookup succeeded: session={labos_session_id}")
+        except Exception as exc:
+            join_error = f"Live lookup request error: {exc}"
+            logger.warning(f"[WS] Live lookup request error for {session_id[:8]}: {exc}")
+
+    elif is_compact:
+        # Legacy compact QR with h/r/s/k fields — call /sessions/{id}/join.
         host = str(payload.get("h", "")).strip()
         rtsp_host = str(payload.get("r", "")).strip()
         raw_session_id = str(payload.get("s", "")).strip()
@@ -498,14 +534,10 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
         join_url = f"http://{host}/api/v2/live/sessions/{raw_session_id}/join"
         try:
             import httpx
-            headers = {"Content-Type": "application/json"}
-            # if join_key:
-            #     headers["Authorization"] = f"Bearer {join_key}"
-            #     headers["X-Session-Key"] = join_key
             async with httpx.AsyncClient(timeout=8.0) as client_http:
                 response = await client_http.post(
                     join_url,
-                    headers=headers,
+                    headers={"Content-Type": "application/json"},
                     json={"token": join_key} if join_key else {},
                 )
             if response.status_code >= 400:
@@ -518,7 +550,9 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
         except Exception as exc:
             join_error = f"Live join request error: {exc}"
             logger.warning(f"[WS] Live join request error for {session_id[:8]}: {exc}")
+
     else:
+        # Verbose format (legacy).
         if payload.get("type") != "labos_live":
             logger.warning(f"[WS] Invalid QR payload for {session_id[:8]}")
             return
