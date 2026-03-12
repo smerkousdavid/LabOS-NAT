@@ -23,25 +23,31 @@ except ImportError:
     websockets = None  # type: ignore
 
 # ---------------------------------------------------------------------------
-# Per-session registry
+# Per-runtime-session registry
 # ---------------------------------------------------------------------------
+# IMPORTANT:
+# - runtime_session_id: NAT<->XR session key (middleman route through ws_handler)
+# - live_session_id: website live session key (LabOS dashboard session)
+#
+# The client registry is keyed by runtime_session_id so ws_handler can always
+# target the correct XR connection.
 
 _labos_clients: Dict[str, "LabOSLiveClient"] = {}
 
 
-def get_labos_client(session_id: Optional[str] = None) -> Optional["LabOSLiveClient"]:
-    if session_id is None:
+def get_labos_client(runtime_session_id: Optional[str] = None) -> Optional["LabOSLiveClient"]:
+    if runtime_session_id is None:
         from config import _current_session_id
-        session_id = _current_session_id.get("default-xr-session")
-    return _labos_clients.get(session_id)
+        runtime_session_id = _current_session_id.get("default-xr-session")
+    return _labos_clients.get(runtime_session_id)
 
 
-def set_labos_client(session_id: str, client: "LabOSLiveClient"):
-    _labos_clients[session_id] = client
+def set_labos_client(runtime_session_id: str, client: "LabOSLiveClient"):
+    _labos_clients[runtime_session_id] = client
 
 
-def remove_labos_client(session_id: str):
-    _labos_clients.pop(session_id, None)
+def remove_labos_client(runtime_session_id: str):
+    _labos_clients.pop(runtime_session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -49,17 +55,24 @@ def remove_labos_client(session_id: str):
 # ---------------------------------------------------------------------------
 
 class LabOSLiveClient:
-    """WebSocket client for streaming events to the LabOS web frontend."""
+    """WebSocket client that bridges NAT/XR and LabOS web live session.
+
+    ID model:
+      - runtime_session_id: session key used inside NAT for XR routing/state.
+      - live_session_id: session key used by LabOS website session/dashboard.
+    """
 
     def __init__(
         self,
         ws_endpoint: str,
-        session_id: str,
+        runtime_session_id: str,
+        live_session_id: str,
         token: str = "",
         on_start_protocol: Optional[Callable[..., Coroutine]] = None,
     ):
         self._ws_endpoint = ws_endpoint
-        self._session_id = session_id
+        self._runtime_session_id = runtime_session_id
+        self._live_session_id = live_session_id
         self._token = token
         self._ws = None
         self._connected = False
@@ -131,9 +144,14 @@ class LabOSLiveClient:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     async def send_event(self, event: dict):
+        """Send an event to the LabOS website live session.
+
+        All outbound website messages include live_session_id for traceability.
+        """
         if not self.connected:
             return
         event.setdefault("timestamp", self._timestamp())
+        event.setdefault("live_session_id", self._live_session_id)
         try:
             await self._ws.send(json.dumps(event))
         except Exception as exc:
@@ -238,20 +256,42 @@ class LabOSLiveClient:
             return
 
         logger.info(f"[LabOSLive] Received start_protocol_by_text: {name}")
+        from config import _current_session_id
+        # Route all local tool/state calls through the active XR runtime session.
+        session_token = _current_session_id.set(self._runtime_session_id)
+        try:
+            if self._on_start_protocol:
+                try:
+                    await self._on_start_protocol(name, text)
+                except Exception as exc:
+                    logger.error(f"[LabOSLive] start_protocol_by_text handler failed: {exc}")
+                return
 
-        if self._on_start_protocol:
-            try:
-                await self._on_start_protocol(name, text)
-            except Exception as exc:
-                logger.error(f"[LabOSLive] start_protocol_by_text handler failed: {exc}")
-        else:
             from tools.protocols.state import get_protocol_state
             from tools.protocols.store import build_protocol_entry, _parse_steps
-            state = get_protocol_state(self._session_id)
+            from tools.protocols.tools import _start_protocol_impl
+            import re
+
+            state = get_protocol_state(self._runtime_session_id)
             steps = _parse_steps(text)
-            safe_key = name.lower().replace(" ", "_")
+            if not steps:
+                logger.warning(
+                    f"[LabOSLive] Could not parse protocol steps for '{name}' from start_protocol_by_text"
+                )
+                return
+
+            safe_key = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "web_protocol"
+            is_update = safe_key in state.session_protocols
             state.session_protocols[safe_key] = build_protocol_entry(name, steps, text)
-            logger.info(f"[LabOSLive] Stored session protocol '{name}' with {len(steps)} steps")
+            action = "Updated" if is_update else "Stored"
+            logger.info(
+                f"[LabOSLive] {action} session protocol '{name}' with {len(steps)} steps; starting now"
+            )
+
+            result = await _start_protocol_impl(name)
+            logger.info(f"[LabOSLive] start_protocol_by_text start result: {result}")
+        finally:
+            _current_session_id.reset(session_token)
 
     async def _handle_clear_session(self, msg: dict):
         """Handle a web-initiated session clear/stop."""
@@ -259,7 +299,7 @@ class LabOSLiveClient:
 
         try:
             from tools.vsop_providers import get_vsop_provider_for_session
-            provider = get_vsop_provider_for_session(self._session_id)
+            provider = get_vsop_provider_for_session(self._runtime_session_id)
             if provider and provider.is_active:
                 await provider.stop()
         except Exception as exc:
@@ -267,36 +307,36 @@ class LabOSLiveClient:
 
         try:
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state(self._session_id)
+            state = get_protocol_state(self._runtime_session_id)
             state.reset(clear_session_protocols=True)
         except Exception:
             pass
 
         try:
             from context.manager import _context_managers, ContextManager
-            cm = _context_managers.get(self._session_id)
+            cm = _context_managers.get(self._runtime_session_id)
             if cm is None:
                 cm = ContextManager()
-                _context_managers[self._session_id] = cm
+                _context_managers[self._runtime_session_id] = cm
             cm.set_context("main_menu")
         except Exception:
             pass
 
         try:
             from ws_handler import send_to_session
-            await send_to_session(self._session_id, {"type": "session_cleared"})
+            await send_to_session(self._runtime_session_id, {"type": "session_cleared"})
         except Exception as exc:
             logger.warning(f"[LabOSLive] Failed to send session_cleared to runtime: {exc}")
 
         await self.send_end_stream()
         await self.disconnect()
         try:
-            remove_labos_client(self._session_id)
+            remove_labos_client(self._runtime_session_id)
         except Exception:
             pass
 
         try:
             from tools.display.ui import render_qr_scanning
-            await render_qr_scanning()
+            await render_qr_scanning(session_id=self._runtime_session_id)
         except Exception:
             pass

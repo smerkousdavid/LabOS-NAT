@@ -113,6 +113,7 @@ def generate_nat_config(cfg: dict, secrets: dict) -> dict:
             "enabled": labos_live.get("enabled", False),
             "initial_qr_code": labos_live.get("initial_qr_code", False),
             "website_base_url": labos_live.get("website_base_url", ""),
+            "api_base": labos_live.get("api_base", "http://backend:18800"),
         },
         "tools": tools,
         "secrets": {

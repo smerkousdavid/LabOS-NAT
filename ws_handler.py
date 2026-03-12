@@ -303,7 +303,13 @@ def _start_bg_buffer(session_id: str, stream_info: dict) -> None:
 
 
 async def _handle_protocol_push(session_id: str, msg: dict) -> None:
-    """Store runtime-pushed protocols in per-session memory (not disk)."""
+    """Store runtime-pushed protocols in per-session memory (not disk).
+
+    Supports both initial pushes and updates.  If a protocol with the same
+    name already exists it is overwritten silently.  If the currently
+    *running* protocol is updated, the active step list is refreshed
+    in-place so the user sees the latest content without restarting.
+    """
     from tools.protocols.state import get_protocol_state
     from tools.protocols.store import build_protocol_entry, _parse_steps
 
@@ -312,7 +318,8 @@ async def _handle_protocol_push(session_id: str, msg: dict) -> None:
         return
 
     state = get_protocol_state(session_id)
-    count = 0
+    new_count = 0
+    updated_count = 0
     for proto in protocols:
         name = proto.get("name", "").strip()
         content = proto.get("content", "").strip()
@@ -320,11 +327,51 @@ async def _handle_protocol_push(session_id: str, msg: dict) -> None:
             continue
         steps = _parse_steps(content)
         safe_key = name.lower().replace(" ", "_")
+        is_update = safe_key in state.session_protocols
         state.session_protocols[safe_key] = build_protocol_entry(name, steps, content)
-        count += 1
+        if is_update:
+            updated_count += 1
+        else:
+            new_count += 1
 
-    if count:
-        logger.info(f"[WS] Stored {count} session protocol(s) for {session_id[:8]} (in-memory)")
+        if (
+            is_update
+            and state.is_active
+            and state.protocol_name
+            and state.protocol_name.lower().replace(" ", "_") == safe_key
+        ):
+            from tools.protocols.tools import _quick_compact_steps, _build_step_payload, _extract_robot_annotation
+            from tools.protocols.state import StepDetail
+            compacted = _quick_compact_steps(steps)
+            if compacted:
+                new_details = []
+                for p in compacted:
+                    clean, robot_proto = _extract_robot_annotation(p["text"])
+                    new_details.append(StepDetail(
+                        text=clean,
+                        description=p["detail"],
+                        robot_protocol=robot_proto,
+                        image_url=p.get("image_url", ""),
+                        image_query=p.get("image_query", ""),
+                    ))
+                state.steps = new_details
+                logger.info(
+                    f"[WS] Live-updated running protocol '{name}' "
+                    f"({len(new_details)} steps) for {session_id[:8]}"
+                )
+                try:
+                    from tools.display import ui as viture_ui
+                    await viture_ui.render_step_panel(state, session_id=session_id)
+                except Exception:
+                    pass
+
+    parts = []
+    if new_count:
+        parts.append(f"{new_count} new")
+    if updated_count:
+        parts.append(f"{updated_count} updated")
+    if parts:
+        logger.info(f"[WS] Received {', '.join(parts)} protocol(s) for {session_id[:8]} (in-memory)")
 
 
 async def _handle_fast_command(session_id: str, msg: dict, ws: WebSocket):
@@ -496,6 +543,7 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
         from config import get_labos_live_config
         api_base = get_labos_live_config().get("api_base", "http://backend:18800").rstrip("/")
         lookup_url = f"{api_base}/api/v2/live/sessions/lookup"
+        logger.info(f"[WS] Live lookup for {session_id[:8]}: POST {lookup_url} code={pairing_code}")
         try:
             import httpx
             async with httpx.AsyncClient(timeout=8.0) as client_http:
@@ -513,7 +561,9 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
                 logger.info(f"[WS] Lookup succeeded: session={labos_session_id}")
         except Exception as exc:
             join_error = f"Live lookup request error: {exc}"
-            logger.warning(f"[WS] Live lookup request error for {session_id[:8]}: {exc}")
+            logger.warning(
+                f"[WS] Live lookup request error for {session_id[:8]}: {exc} (url={lookup_url})"
+            )
 
     elif is_compact:
         # Legacy compact QR with h/r/s/k fields — call /sessions/{id}/join.
@@ -540,6 +590,16 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
                     headers={"Content-Type": "application/json"},
                     json={"token": join_key} if join_key else {},
                 )
+            try:
+                decoded_body = response.json()
+                decoded_text = json.dumps(decoded_body, ensure_ascii=True)
+            except Exception:
+                decoded_text = response.text
+            if len(decoded_text) > 1000:
+                decoded_text = decoded_text[:997] + "..."
+            logger.info(
+                f"[WS] Live join POST response ({session_id[:8]}): status={response.status_code} body={decoded_text}"
+            )
             if response.status_code >= 400:
                 join_error = f"Live join failed ({response.status_code})"
                 logger.warning(
@@ -562,7 +622,27 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
         publish_rtsp = payload.get("publish_rtsp", "")
 
     if not ws_endpoint:
-        logger.error(f"[WS] QR payload missing ws_endpoint for {session_id[:8]}")
+        logger.error(
+            f"[WS] QR payload missing ws_endpoint for {session_id[:8]}"
+            + (f" (reason: {join_error})" if join_error else " (no join_error set)")
+        )
+        error_for_user = join_error or "Could not get connection details."
+        err_text = (
+            "Live session inactive: failed to connect. "
+            "Please rescan QR or restart the live session."
+        )
+        await ws.send_json({
+            "type": "notification",
+            "text": err_text,
+            "tts": True,
+        })
+        await ws.send_json({
+            "type": "session_connect_failed",
+            "session_id": labos_session_id or "",
+            "error": error_for_user,
+        })
+        from tools.display.ui import render_connection_failed
+        await render_connection_failed(error_for_user, session_id=session_id)
         return
 
     if join_error:
@@ -580,8 +660,8 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
             "session_id": labos_session_id,
             "error": join_error,
         })
-        from tools.display.ui import render_qr_scanning
-        await render_qr_scanning()
+        from tools.display.ui import render_connection_failed
+        await render_connection_failed(join_error, session_id=session_id)
         return
 
     logger.info(f"[WS] QR payload received: session={labos_session_id}, endpoint={ws_endpoint}")
@@ -597,9 +677,20 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
     _current_session_id.set(session_id)
     await render_connecting(labos_session_id)
 
+    logger.info(f"[WS] Connecting to LabOS Live session: {ws_endpoint}")
+    logger.info(f"[WS] LabOS Live session ID: {labos_session_id}")
+    logger.info(f"[WS] LabOS Live session token: {token}")
+    logger.info(f"[WS] LabOS Live session publish_rtsp: {publish_rtsp}")
+    logger.info(f"[WS] LabOS Live session session_id: {session_id}")
+    logger.info(f"[WS] LabOS Live session ws_endpoint: {ws_endpoint}")
+
+    # Keep IDs distinct:
+    # - runtime_session_id routes NAT -> XR messages via ws_handler session map.
+    # - live_session_id tags website-side events for the LabOS live dashboard session.
     client = LabOSLiveClient(
         ws_endpoint=ws_endpoint,
-        session_id=labos_session_id,
+        runtime_session_id=session_id,
+        live_session_id=labos_session_id,
         token=token,
     )
     await client.connect()
@@ -612,7 +703,8 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
             logger.info(f"[WS] QR ws_endpoint failed, trying fallback: {fallback_ws}")
             client = LabOSLiveClient(
                 ws_endpoint=fallback_ws,
-                session_id=labos_session_id,
+                runtime_session_id=session_id,
+                live_session_id=labos_session_id,
                 token=token,
             )
             await client.connect()
@@ -632,13 +724,14 @@ async def _handle_qr_payload(session_id: str, msg: dict, ws):
 
         logger.info(f"[WS] LabOS Live session connected: {labos_session_id}")
     else:
+        connect_fail_msg = "Failed to connect to LabOS server (tried QR endpoint and fallback)"
         await ws.send_json({
             "type": "session_connect_failed",
             "session_id": labos_session_id,
-            "error": "Failed to connect to LabOS server (tried QR endpoint and fallback)",
+            "error": connect_fail_msg,
         })
-        from tools.display.ui import render_qr_scanning
-        await render_qr_scanning()
+        from tools.display.ui import render_connection_failed
+        await render_connection_failed(connect_fail_msg)
 
 
 def get_labos_client_for_session(session_id: str):

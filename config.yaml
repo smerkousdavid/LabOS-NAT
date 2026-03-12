@@ -45,10 +45,10 @@ nat:
     chat_frames: 5                        # frames attached to user chat messages
 
   labos_live:
-    enabled: false                        # master switch -- activated by QR code payload
-    initial_qr_code: false                # show QR scanning prompt on XR startup
-    website_base_url: "ws://100.100.203.84:18800"            # fallback URL if QR ws_endpoint fails (e.g. "wss://labos.example.com")
-    api_base: "http://100.100.203.84:18800"  # LabOS backend URL reachable from this machine (VPN IP)
+    enabled: true                        # master switch -- activated by QR code payload
+    initial_qr_code: true                # show QR scanning prompt on XR startup
+    website_base_url: "ws://100.101.13.72:18800"            # fallback URL if QR ws_endpoint fails (e.g. "wss://labos.example.com")
+    api_base: "http://100.101.13.72:18800"  # LabOS backend URL reachable from this machine (VPN IP)
 
   tools:
     vlm: { enabled: true }

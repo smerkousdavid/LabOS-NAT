@@ -159,6 +159,11 @@ def _build_tool_declarations():
             description="Get all errors recorded during the current protocol run.",
             parameters=types.Schema(type="OBJECT", properties={}),
         ),
+        types.FunctionDeclaration(
+            name="reset_session",
+            description="Reset the entire session back to the main menu. Clears protocol state, session protocols, and context. Use when user says 'reset', 'restart session', 'go home', 'main menu', 'start over', or 'clear session'.",
+            parameters=types.Schema(type="OBJECT", properties={}),
+        ),
     ]
 
 
@@ -175,6 +180,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
     from tools.vsop_providers import get_vsop_provider
 
     provider = get_vsop_provider()
+    sid = provider.get_bound_session_id() if provider else None
 
     # -- Navigation (direct provider calls) ----------------------------------
     if name == "next_step":
@@ -210,7 +216,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         if provider and provider.is_active:
             result = await provider.stop()
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state()
+            state = get_protocol_state(sid)
             state.reset()
             from context.manager import get_context_manager
             get_context_manager().set_context("main_menu")
@@ -219,13 +225,31 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
             return result
         return "No active protocol."
 
+    if name == "reset_session":
+        from tools.protocols.state import get_protocol_state
+        from context.manager import get_context_manager
+        from tools.display.ui import render_greeting
+        state = get_protocol_state(sid)
+        if provider and provider.is_active:
+            try:
+                await provider.stop()
+            except Exception:
+                pass
+        state.reset(clear_session_protocols=True)
+        get_context_manager().set_context("main_menu")
+        try:
+            await render_greeting()
+        except Exception:
+            pass
+        return "Session reset. Back at main menu."
+
     if name == "list_protocols":
         from tools.protocols.store import get_protocol_store, list_available_protocols
         from tools.display.ui import render_protocol_list
         from tools.protocols.state import get_protocol_state
         from context.manager import get_context_manager
         store = get_protocol_store()
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         protocols = list_available_protocols(store, state)
         if not protocols:
             return "No protocols are currently available in the database."
@@ -249,7 +273,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         from tools.display import ui as viture_ui
 
         store = get_protocol_store()
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         proto_name = args.get("protocol_name", "")
         proto = find_available_protocol(proto_name, store, state)
         if not proto:
@@ -321,22 +345,14 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
 
     # -- Data logging ---------------------------------------------------------
     if name == "log_observation":
-        from tools.protocols.state import get_protocol_state
-        from datetime import datetime
-        state = get_protocol_state()
         observation = args.get("observation", "")
-        section = args.get("section", "notes")
-        if state.is_active and observation:
-            if "sections" not in state.experiment_data:
-                state.experiment_data["sections"] = {}
-            sec = state.experiment_data["sections"].setdefault(section, {"rows": []})
-            sec["rows"].append({
-                "note": observation,
-                "_step": str(state.current_step),
-                "_timestamp": datetime.utcnow().strftime("%H:%M:%S"),
-            })
-            return f"Logged to '{section}': {observation}"
-        return "No active protocol to log data."
+        section = args.get("section", "observations")
+        from tools.protocols.tools import _log_observation_impl
+        return await _log_observation_impl(
+            observation=observation,
+            section=section,
+            session_id=sid,
+        )
 
     # -- Display / TTS --------------------------------------------------------
     if name == "send_to_display":
@@ -351,7 +367,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
     if name == "show_protocol_panel":
         from tools.protocols.state import get_protocol_state
         from tools.display.ui import render_step_panel, render_greeting
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         if state.mode == "running" and state.steps:
             await render_step_panel(state)
             return "Protocol step panel restored."
@@ -368,7 +384,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
     # -- Protocol queries -----------------------------------------------------
     if name == "get_protocol_status":
         from tools.protocols.state import get_protocol_state
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         if not state.is_active and state.mode != "completed":
             return "No active protocol."
         return (
@@ -379,7 +395,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
 
     if name == "get_errors":
         from tools.protocols.state import get_protocol_state
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         errors = state.error_history
         if not errors:
             return "No errors recorded in this session."
@@ -391,7 +407,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
     if name == "detailed_step":
         step_num = args.get("step_num")
         from tools.protocols.state import get_protocol_state
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         if not state.is_active:
             return "No active protocol."
         idx = (step_num or state.current_step) - 1
@@ -402,7 +418,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
 
     if name == "show_experiment_data":
         from tools.protocols.state import get_protocol_state
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         section = args.get("section", "")
         data = state.experiment_data.get("sections", {})
         if not data:
@@ -423,7 +439,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
 
     if name == "query_completed_protocol_data":
         from tools.protocols.state import get_protocol_state
-        state = get_protocol_state()
+        state = get_protocol_state(sid)
         question = args.get("question", "")
         data = state.experiment_data.get("sections", {})
         errors = state.error_history
@@ -452,7 +468,7 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
 def _sync_state_from_provider(provider):
     """Keep ProtocolState in sync with the provider after navigation."""
     from tools.protocols.state import get_protocol_state
-    state = get_protocol_state()
+    state = get_protocol_state(provider.get_bound_session_id())
     if not state.is_active:
         return
     state.current_step = provider._current_step
@@ -942,7 +958,7 @@ class GeminiLiveProvider(VSOPProvider):
 
         try:
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state()
+            state = get_protocol_state(self.get_bound_session_id())
             if state.is_active and detail:
                 old_vision = state.stella_vision_text
                 state.stella_vision_text = detail
@@ -988,7 +1004,7 @@ class GeminiLiveProvider(VSOPProvider):
                 return
 
             from tools.protocols.state import get_protocol_state
-            state = get_protocol_state()
+            state = get_protocol_state(self.get_bound_session_id())
             if state.is_active and not state.is_error_on_cooldown():
                 idx = self._current_step - 1
                 step_text = self._steps[idx] if idx < len(self._steps) else ""
@@ -1005,7 +1021,7 @@ class GeminiLiveProvider(VSOPProvider):
             self._step_complete_announced = True
             try:
                 from tools.protocols.state import get_protocol_state
-                state = get_protocol_state()
+                state = get_protocol_state(self.get_bound_session_id())
                 if state.is_active:
                     state.stella_vision_text = "Step appears complete. Say 'next step' to continue."
                     from tools.display import ui as viture_ui
@@ -1117,7 +1133,7 @@ class GeminiLiveProvider(VSOPProvider):
         from context.manager import build_all_steps_block
         from tools.protocols.state import get_protocol_state
 
-        state = get_protocol_state()
+        state = get_protocol_state(self.get_bound_session_id())
         all_steps = build_all_steps_block(
             self._steps, self._current_step, self._completed_steps
         )

@@ -1047,9 +1047,7 @@ async def list_protocols() -> str:
     )
 
 
-@function_tool
-@toggle_dashboard("start_protocol")
-async def start_protocol(
+async def _start_protocol_impl(
     protocol_name: Annotated[str, Field(
         description="Name of the protocol to start, e.g. 'phone placement', "
         "'PCR amplification'. Can be a number from the listed protocols, "
@@ -1167,6 +1165,20 @@ async def start_protocol(
         await viture_ui.render_step_panel(state)
         await _emit_labos_protocol_start(state)
     return resp
+
+
+@function_tool
+@toggle_dashboard("start_protocol")
+async def start_protocol(
+    protocol_name: Annotated[str, Field(
+        description="Name of the protocol to start, e.g. 'phone placement', "
+        "'PCR amplification'. Can be a number from the listed protocols, "
+        "a protocol name, or a custom experiment description."
+    )]
+) -> str:
+    """Start running a laboratory protocol. Use when the user wants to run,
+    start, execute, begin, or do a protocol or experiment."""
+    return await _start_protocol_impl(protocol_name)
 
 
 @function_tool
@@ -1299,9 +1311,7 @@ async def clear_error() -> str:
     return f"Error cleared. Continuing with step {state.current_step}: {step_text}"
 
 
-@function_tool
-@toggle_dashboard("reset_session")
-async def reset_session() -> str:
+async def _reset_session_impl() -> str:
     """Reset the session to the main menu. Clears protocol state, session
     protocols, and context. Use when user says 'reset', 'go home',
     'main menu', or 'start over'."""
@@ -1326,8 +1336,15 @@ async def reset_session() -> str:
 
 
 @function_tool
-@toggle_dashboard("available_commands")
-async def available_commands() -> str:
+@toggle_dashboard("reset_session")
+async def reset_session() -> str:
+    """Reset the session to the main menu. Clears protocol state, session
+    protocols, and context. Use when user says 'reset', 'go home',
+    'main menu', or 'start over'."""
+    return await _reset_session_impl()
+
+
+async def _available_commands_impl() -> str:
     """Show available commands on the AR display. Use when user asks
     'what can I do?', 'what can you do?', 'help', or 'commands'."""
     try:
@@ -1339,8 +1356,14 @@ async def available_commands() -> str:
 
 
 @function_tool
-@toggle_dashboard("practice_guidance")
-async def practice_guidance(
+@toggle_dashboard("available_commands")
+async def available_commands() -> str:
+    """Show available commands on the AR display. Use when user asks
+    'what can I do?', 'what can you do?', 'help', or 'commands'."""
+    return await _available_commands_impl()
+
+
+async def _practice_guidance_impl(
     query: Annotated[str, Field(description="Lab equipment or technique name, e.g. 'pipette', 'centrifuge', 'vortexer'")]
 ) -> str:
     """Look up guidance for a lab tool or technique and display on AR.
@@ -1396,8 +1419,17 @@ async def practice_guidance(
 
 
 @function_tool
-@toggle_dashboard("start_protocol_discussion")
-async def start_protocol_discussion() -> str:
+@toggle_dashboard("practice_guidance")
+async def practice_guidance(
+    query: Annotated[str, Field(description="Lab equipment or technique name, e.g. 'pipette', 'centrifuge', 'vortexer'")]
+) -> str:
+    """Look up guidance for a lab tool or technique and display on AR.
+    Adapts parameters to the current protocol context (e.g. RPM, volumes).
+    Use when user asks 'how do I use a pipette?' or similar."""
+    return await _practice_guidance_impl(query)
+
+
+async def _start_protocol_discussion_impl() -> str:
     """Begin a protocol discussion session where the user can describe and
     refine a temporary protocol before running it. Use when user says
     'let's create a protocol' or 'discuss a protocol'."""
@@ -1411,8 +1443,15 @@ async def start_protocol_discussion() -> str:
 
 
 @function_tool
-@toggle_dashboard("update_protocol_discussion")
-async def update_protocol_discussion(
+@toggle_dashboard("start_protocol_discussion")
+async def start_protocol_discussion() -> str:
+    """Begin a protocol discussion session where the user can describe and
+    refine a temporary protocol before running it. Use when user says
+    'let's create a protocol' or 'discuss a protocol'."""
+    return await _start_protocol_discussion_impl()
+
+
+async def _update_protocol_discussion_impl(
     text: Annotated[str, Field(description="Updated protocol text or step list")]
 ) -> str:
     """Update the draft protocol being discussed. Call when user provides
@@ -1423,8 +1462,16 @@ async def update_protocol_discussion(
 
 
 @function_tool
-@toggle_dashboard("run_discussed_protocol")
-async def run_discussed_protocol(
+@toggle_dashboard("update_protocol_discussion")
+async def update_protocol_discussion(
+    text: Annotated[str, Field(description="Updated protocol text or step list")]
+) -> str:
+    """Update the draft protocol being discussed. Call when user provides
+    or modifies protocol steps during discussion mode."""
+    return await _update_protocol_discussion_impl(text)
+
+
+async def _run_discussed_protocol_impl(
     name: Annotated[str, Field(description="Name for the protocol")] = "Custom Protocol"
 ) -> str:
     """Compile and start the discussed protocol from the draft text.
@@ -1442,8 +1489,18 @@ async def run_discussed_protocol(
     safe_key = name.lower().replace(" ", "_")
     state.session_protocols[safe_key] = build_protocol_entry(name, steps, draft)
 
-    result = await start_protocol(protocol_name=name)
+    result = await _start_protocol_impl(name)
     return result
+
+
+@function_tool
+@toggle_dashboard("run_discussed_protocol")
+async def run_discussed_protocol(
+    name: Annotated[str, Field(description="Name for the protocol")] = "Custom Protocol"
+) -> str:
+    """Compile and start the discussed protocol from the draft text.
+    Use when user says 'run this', 'start it', 'let's go'."""
+    return await _run_discussed_protocol_impl(name)
 
 
 @function_tool
@@ -1472,6 +1529,38 @@ async def get_protocol_status() -> str:
     )
 
 
+async def _log_observation_impl(
+    observation: Annotated[str, Field(description="The observation or data point to record, e.g. 'phone is heavy', 'colonies look dead in dish 3'")],
+    section: Annotated[str, Field(description="Category: observations, tube_weights, timings, temperatures, volumes, notes")] = "observations",
+    session_id: Optional[str] = None,
+) -> str:
+    """Log an observation or data point for the current protocol run.
+    Use when user says log, note, record, or describes something noteworthy.
+    The data is saved with the current step number and timestamp."""
+    from config import _current_session_id
+    session_token = None
+    if session_id:
+        # Ensure downstream emit hooks route to the correct runtime session.
+        session_token = _current_session_id.set(session_id)
+    try:
+        state = get_protocol_state(session_id)
+        if not state.is_active or state.mode != "running":
+            return "No protocol is currently running."
+
+        row = {"note": observation.strip()}
+        if _record_capture(state, section, row):
+            state.extra_context = (state.extra_context or "").strip()
+            if state.extra_context:
+                state.extra_context += "\n\n"
+            state.extra_context += state.experiment_data_xml()
+            step_info = f"step {state.current_step}" if state.current_step else "current step"
+            return f"Logged at {step_info}: {observation.strip()}"
+        return "Already recorded that observation."
+    finally:
+        if session_token is not None:
+            _current_session_id.reset(session_token)
+
+
 @function_tool
 @toggle_dashboard("log_observation")
 async def log_observation(
@@ -1481,19 +1570,7 @@ async def log_observation(
     """Log an observation or data point for the current protocol run.
     Use when user says log, note, record, or describes something noteworthy.
     The data is saved with the current step number and timestamp."""
-    state = get_protocol_state()
-    if not state.is_active or state.mode != "running":
-        return "No protocol is currently running."
-
-    row = {"note": observation.strip()}
-    if _record_capture(state, section, row):
-        state.extra_context = (state.extra_context or "").strip()
-        if state.extra_context:
-            state.extra_context += "\n\n"
-        state.extra_context += state.experiment_data_xml()
-        step_info = f"step {state.current_step}" if state.current_step else "current step"
-        return f"Logged at {step_info}: {observation.strip()}"
-    return "Already recorded that observation."
+    return await _log_observation_impl(observation=observation, section=section)
 
 
 @function_tool

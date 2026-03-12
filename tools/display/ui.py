@@ -333,6 +333,28 @@ async def render_completion(protocol_name: str, rich_summary: str = "", session_
     await _push_panel([{"type": "rich-text", "content": content}], session_id=session_id)
 
 
+def _escape_error_for_display(text: str) -> str:
+    """Escape error text so it does not break TMP rich-text tags."""
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").strip()
+
+
+async def render_connection_failed(error_summary: str, session_id: Optional[str] = None) -> None:
+    """Show connection failed state with error summary on the glasses."""
+    display_error = (error_summary or "Unknown error").strip()
+    if len(display_error) > 140:
+        display_error = display_error[:137] + "..."
+    display_error = _escape_error_for_display(display_error)
+    content = (
+        '<size=22><b>Connection failed</b></size><br><br>'
+        f'<size=16><color=#FF4444>{display_error}</color></size><br><br>'
+        '<size=14><color=#999999>Rescan the QR code to try again.</color></size>'
+    )
+    set_display_mode("protocol")
+    await _push_panel([{"type": "rich-text", "content": content}], session_id=session_id)
+
+
 async def render_qr_scanning(session_id: Optional[str] = None) -> None:
     """Show QR code scanning prompt with camera preview placeholder."""
     content = (

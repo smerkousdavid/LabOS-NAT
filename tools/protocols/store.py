@@ -257,12 +257,11 @@ def list_available_protocols(store: ProtocolStore, state) -> List[dict]:
     disk = store.list_protocols()
     session = []
     for key, entry in getattr(state, "session_protocols", {}).items():
-        session.append({
-            "name": entry.get("name", key),
-            "pretty_name": entry.get("pretty_name", key),
-            "steps": entry.get("steps", []),
-            "step_count": len(entry.get("steps", [])),
-        })
+        merged = dict(entry)
+        merged.setdefault("name", key)
+        merged.setdefault("pretty_name", key)
+        merged.setdefault("step_count", len(entry.get("steps", [])))
+        session.append(merged)
     return disk + session
 
 

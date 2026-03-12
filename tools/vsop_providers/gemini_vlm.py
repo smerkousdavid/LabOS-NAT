@@ -377,22 +377,14 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         return f"Protocol '{proto_name}' not found."
 
     if name == "log_observation":
-        from tools.protocols.state import get_protocol_state
-        from datetime import datetime
-        state = get_protocol_state(sid)
         observation = args.get("observation", "")
-        section = args.get("section", "notes")
-        if state.is_active and observation:
-            if "sections" not in state.experiment_data:
-                state.experiment_data["sections"] = {}
-            sec = state.experiment_data["sections"].setdefault(section, {"rows": []})
-            sec["rows"].append({
-                "note": observation,
-                "_step": str(state.current_step),
-                "_timestamp": datetime.utcnow().strftime("%H:%M:%S"),
-            })
-            return f"Logged to '{section}': {observation}"
-        return "No active protocol to log data."
+        section = args.get("section", "observations")
+        from tools.protocols.tools import _log_observation_impl
+        return await _log_observation_impl(
+            observation=observation,
+            section=section,
+            session_id=sid,
+        )
 
     if name == "send_to_display":
         from tools.display.ui import render_rich_panel
@@ -506,36 +498,36 @@ async def _dispatch_tool_call(name: str, args: dict) -> str:
         return str(result)
 
     if name == "reset_session":
-        from tools.protocols.tools import reset_session
-        result = await reset_session()
+        from tools.protocols.tools import _reset_session_impl
+        result = await _reset_session_impl()
         return str(result)
 
     if name == "available_commands":
-        from tools.protocols.tools import available_commands
-        result = await available_commands()
+        from tools.protocols.tools import _available_commands_impl
+        result = await _available_commands_impl()
         return str(result)
 
     if name == "practice_guidance":
         query = args.get("query", "")
-        from tools.protocols.tools import practice_guidance
-        result = await practice_guidance(query=query)
+        from tools.protocols.tools import _practice_guidance_impl
+        result = await _practice_guidance_impl(query=query)
         return str(result)
 
     if name == "start_protocol_discussion":
-        from tools.protocols.tools import start_protocol_discussion
-        result = await start_protocol_discussion()
+        from tools.protocols.tools import _start_protocol_discussion_impl
+        result = await _start_protocol_discussion_impl()
         return str(result)
 
     if name == "update_protocol_discussion":
         text = args.get("text", "")
-        from tools.protocols.tools import update_protocol_discussion
-        result = await update_protocol_discussion(text=text)
+        from tools.protocols.tools import _update_protocol_discussion_impl
+        result = await _update_protocol_discussion_impl(text=text)
         return str(result)
 
     if name == "run_discussed_protocol":
         pname = args.get("name", "Custom Protocol")
-        from tools.protocols.tools import run_discussed_protocol
-        result = await run_discussed_protocol(name=pname)
+        from tools.protocols.tools import _run_discussed_protocol_impl
+        result = await _run_discussed_protocol_impl(name=pname)
         return str(result)
 
     logger.warning(f"[GeminiVLM] Unknown tool call: {name}")
